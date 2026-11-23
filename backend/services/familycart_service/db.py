@@ -1,45 +1,69 @@
-import sqlite3
+import os
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
+from backend.shared.database import DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target
+
 SQL_DIR = Path(__file__).parent
 
 
-def initialize_database(path: Path) -> None:
-    schema = (SQL_DIR / "schema.sql").read_text(encoding="utf-8")
+def database_target() -> DatabaseTarget:
+    return os.environ.get("FAMILYCART_DATABASE_URL") or Path(
+        os.environ.get("FAMILYCART_DB_PATH", "familycart.sqlite3")
+    )
+
+
+def initialize_database(path: DatabaseTarget) -> None:
+    schema_name = "postgres_schema.sql" if is_postgres_target(path) else "schema.sql"
+    schema = (SQL_DIR / schema_name).read_text(encoding="utf-8")
     seed = (SQL_DIR / "seed.sql").read_text(encoding="utf-8")
-    with closing(sqlite3.connect(path)) as db:
-        db.execute("PRAGMA foreign_keys = ON")
-        db.executescript(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\nCOMMIT;")
+    with closing(connect_database(path)) as db:
+        if db.dialect == "sqlite":
+            db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\nCOMMIT;")
+        else:
+            db.execute("BEGIN")
+            try:
+                db.execute_script(schema)
+                db.execute_script(seed)
+            except Exception:
+                db.rollback()
+                raise
+            else:
+                db.commit()
 
 
 @contextmanager
-def transaction(path: Path, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-    with closing(sqlite3.connect(path)) as db:
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys = ON")
+def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[DatabaseConnection]:
+    with closing(connect_database(path)) as db:
         # Writers reserve the write lock before reading membership or grants.
-        with db:
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        db.execute("BEGIN IMMEDIATE" if write and db.dialect == "sqlite" else "BEGIN")
+        try:
             yield db
+        except Exception:
+            db.rollback()
+            raise
+        else:
+            db.commit()
 
 
 def active_member(
-    db: sqlite3.Connection, household_id: str, user_id: str
-) -> sqlite3.Row | None:
+    db: DatabaseConnection, household_id: str, user_id: str
+):
     return db.execute(
         """
-        SELECT role FROM household_members
-        WHERE household_id = ? AND user_id = ? AND active = 1
+        SELECT members.role, profiles.created_by AS owner_id
+        FROM household_members AS members
+        JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
+        WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
         """,
         (household_id, user_id),
     ).fetchone()
 
 
 def load_carts(
-    db: sqlite3.Connection, household_id: str, user_id: str, cart_id: str | None = None
-) -> sqlite3.Cursor:
+    db: DatabaseConnection, household_id: str, user_id: str, cart_id: str | None = None
+):
     query = """
         SELECT carts.id, carts.name, carts.creator_id, carts.adults_only,
                cart_creator_revocations.cart_id IS NOT NULL AS creator_revoked,
@@ -57,7 +81,7 @@ def load_carts(
     return db.execute(query + " ORDER BY carts.id", parameters)
 
 
-def delete_cart(db: sqlite3.Connection, cart_id: str) -> None:
+def delete_cart(db: DatabaseConnection, cart_id: str) -> None:
     # Keep the cart ID for pending sync events and prevent reseeding deleted demo carts.
     db.execute("INSERT INTO deleted_carts (cart_id) VALUES (?)", (cart_id,))
     db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (cart_id,))
@@ -65,7 +89,7 @@ def delete_cart(db: sqlite3.Connection, cart_id: str) -> None:
     db.execute("DELETE FROM cart_creator_revocations WHERE cart_id = ?", (cart_id,))
 
 
-def contribution_quantity(db: sqlite3.Connection, cart_id: str, sku: str, contributor_id: str) -> int:
+def contribution_quantity(db: DatabaseConnection, cart_id: str, sku: str, contributor_id: str) -> int:
     row = db.execute(
         "SELECT quantity FROM cart_item_contributions WHERE cart_id = ? AND sku = ? AND contributor_id = ?",
         (cart_id, sku, contributor_id),
@@ -74,7 +98,7 @@ def contribution_quantity(db: sqlite3.Connection, cart_id: str, sku: str, contri
 
 
 def set_contribution(
-    db: sqlite3.Connection,
+    db: DatabaseConnection,
     household_id: str,
     cart_id: str,
     sku: str,
@@ -98,7 +122,7 @@ def set_contribution(
     )
 
 
-def load_contributions(db: sqlite3.Connection, cart_id: str) -> list[dict]:
+def load_contributions(db: DatabaseConnection, cart_id: str) -> list[dict]:
     rows = db.execute(
         """
         SELECT sku, contributor_id, quantity FROM cart_item_contributions

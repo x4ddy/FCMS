@@ -1,0 +1,1 @@
+"""FamilyCart backend package."""

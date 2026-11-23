@@ -11,21 +11,16 @@ function QuantityButton({ delta, label, disabled, onAdjust }) {
   )
 }
 
-function Catalogue({ products, cart, user, busy, onSetQuantity, onAdjustQuantity, onRemoveItem }) {
+function Catalogue({ products, cart, user, busy, onAdjustQuantity, onRemoveItem }) {
   const [query, setQuery] = useState('')
   const search = query.trim().toLowerCase()
   const matching = products.filter((product) =>
     [product.name, product.category, product.sku].some((value) => value.toLowerCase().includes(search)),
   )
-  const ownQuantities = new Map(cart.contributions
-    .filter((row) => row.contributor_id === user.id)
-    .map((row) => [row.sku, row.quantity]))
-
-  function submitQuantity(event, sku) {
-    event.preventDefault()
-    const quantity = Number(new FormData(event.currentTarget).get('quantity'))
-    if (Number.isSafeInteger(quantity) && quantity > 0) onSetQuantity(sku, quantity)
-  }
+  const sharedQuantities = cart.contributions.reduce((quantities, row) => {
+    quantities.set(row.sku, (quantities.get(row.sku) ?? 0) + row.quantity)
+    return quantities
+  }, new Map())
 
   return (
     <section className="catalogue">
@@ -37,7 +32,7 @@ function Catalogue({ products, cart, user, busy, onSetQuantity, onAdjustQuantity
       {matching.length === 0 && <p className="muted">No products match your search.</p>}
       <ul className="product-grid">
         {matching.map((product) => {
-          const quantity = ownQuantities.get(product.sku)
+          const quantity = sharedQuantities.get(product.sku)
           const restricted = product.min_age > 0 && !cart.adults_only
           return (
             <li className="panel product" key={product.sku}>
@@ -46,22 +41,15 @@ function Catalogue({ products, cart, user, busy, onSetQuantity, onAdjustQuantity
               <p>{aed.format(product.price_fils / 100)}</p>
               {restricted ? <small>Requires an adults-only cart</small> : (
                 <>
-                  <form className="catalogue-quantity" key={quantity ?? 0} onSubmit={(event) => submitQuantity(event, product.sku)}>
-                    <div className="quantity-controls">
-                      <QuantityButton delta={-1} label={product.name} disabled={busy || !quantity}
-                        onAdjust={(delta) => onAdjustQuantity(product.sku, delta)} />
-                      <input type="number" name="quantity" min="1" max={Number.MAX_SAFE_INTEGER}
-                        step="1" required defaultValue={quantity ?? 1} disabled={busy}
-                        aria-label={`Quantity for ${product.name}`} />
-                      <QuantityButton delta={1} label={product.name} disabled={busy}
-                        onAdjust={(delta) => onAdjustQuantity(product.sku, delta)} />
-                    </div>
-                    <button disabled={busy} aria-label={`Set quantity for ${product.name}`}>
-                      {quantity ? 'Update' : 'Add'}
-                    </button>
-                  </form>
-                  {quantity > 0 && <button className="secondary" disabled={busy}
-                    aria-label={`Remove ${product.name}`} onClick={() => onRemoveItem(product.sku, user.id)}>
+                  <div className="quantity-controls catalogue-stepper" aria-label={`Quantity for ${product.name}`}>
+                    <QuantityButton delta={-1} label={product.name} disabled={busy || !quantity}
+                      onAdjust={(delta) => onAdjustQuantity(product.sku, delta)} />
+                    <strong>{quantity ?? 0}</strong>
+                    <QuantityButton delta={1} label={product.name} disabled={busy}
+                      onAdjust={(delta) => onAdjustQuantity(product.sku, delta)} />
+                  </div>
+                  {quantity > 0 && cart.can_manage_access && <button className="secondary" disabled={busy}
+                    aria-label={`Remove ${product.name}`} onClick={() => onRemoveItem(product.sku)}>
                     Remove
                   </button>}
                 </>
@@ -76,11 +64,18 @@ function Catalogue({ products, cart, user, busy, onSetQuantity, onAdjustQuantity
 
 export function CartDetail({
   cart, user, members, grants, busy, products,
-  onSetQuantity, onAdjustQuantity, onRemoveItem, onChangeGrant, onDeleteCart,
+  onAdjustQuantity, onRemoveItem, onChangeGrant, onDeleteCart,
 }) {
   const names = new Map(members.map((member) => [member.id, member.display_name]))
   names.set(user.id, user.display_name)
   const productNames = new Map(products.map((product) => [product.sku, product.name]))
+  const sharedItems = [...cart.contributions.reduce((items, contribution) => {
+    const item = items.get(contribution.sku) ?? { sku: contribution.sku, quantity: 0, contributors: [] }
+    item.quantity += contribution.quantity
+    item.contributors.push(names.get(contribution.contributor_id) ?? contribution.contributor_id)
+    items.set(contribution.sku, item)
+    return items
+  }, new Map()).values()]
 
   return (
     <>
@@ -99,28 +94,28 @@ export function CartDetail({
       <div className="detail-grid">
         <section className="panel" aria-label="Cart items">
           <h2>Items</h2>
-          {cart.contributions.length === 0 ? <p className="muted">This cart is empty.</p> : (
+          {sharedItems.length === 0 ? <p className="muted">This cart is empty.</p> : (
             <ul className="rows">
-              {cart.contributions.map((item) => (
-                <li key={JSON.stringify([item.sku, item.contributor_id])}>
+              {sharedItems.map((item) => (
+                <li key={item.sku}>
                   <div>
                     <strong>{productNames.get(item.sku) ?? item.sku}</strong>
-                    <small>{names.get(item.contributor_id) ?? item.contributor_id}</small>
+                    <small>Added by {item.contributors.join(', ')}</small>
                   </div>
                   <div className="contribution-actions">
-                    {cart.can_edit_items && item.contributor_id === user.id && (
+                    {cart.can_edit_items && (
                       <QuantityButton delta={-1} label={productNames.get(item.sku) ?? item.sku} disabled={busy}
                         onAdjust={(delta) => onAdjustQuantity(item.sku, delta)} />
                     )}
                     <strong>{item.quantity}</strong>
-                    {cart.can_edit_items && item.contributor_id === user.id && (
+                    {cart.can_edit_items && (
                       <QuantityButton delta={1} label={productNames.get(item.sku) ?? item.sku} disabled={busy}
                         onAdjust={(delta) => onAdjustQuantity(item.sku, delta)} />
                     )}
-                    {(cart.can_manage_access || (cart.can_edit_items && item.contributor_id === user.id)) && (
+                    {cart.can_manage_access && (
                       <button className="secondary" disabled={busy}
-                        aria-label={`Remove ${productNames.get(item.sku) ?? item.sku} contributed by ${names.get(item.contributor_id) ?? item.contributor_id}`}
-                        onClick={() => onRemoveItem(item.sku, item.contributor_id)}>
+                        aria-label={`Remove ${productNames.get(item.sku) ?? item.sku}`}
+                        onClick={() => onRemoveItem(item.sku)}>
                         Remove
                       </button>
                     )}
@@ -154,7 +149,7 @@ export function CartDetail({
           </section>
         )}
       </div>
-      {cart.can_edit_items && <Catalogue {...{ products, cart, user, busy, onSetQuantity, onAdjustQuantity, onRemoveItem }} />}
+      {cart.can_edit_items && <Catalogue {...{ products, cart, user, busy, onAdjustQuantity, onRemoveItem }} />}
     </>
   )
 }

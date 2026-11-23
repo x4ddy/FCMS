@@ -1,0 +1,19 @@
+| Requirement | Status | What remains |
+|---|---|---|
+| Individual customer identities | Mostly complete | Real SMS provider, editable profiles and verified adult status |
+| Access/refresh authentication | Complete | Production secrets, HTTPS and secure-cookie configuration |
+| Create household | Complete | — |
+| Manage household | Partial | Rename, close/delete, leave household and ownership transfer |
+| Invite family members | Mostly complete | Deliver invite by SMS/email, list/revoke pending invitations |
+| Assign permissions | Partial | Cart-level grants exist, but no configurable permission matrix |
+| Shared shopping carts/lists | Complete | Checkout conversion and archived/completed lists |
+| Members add products | Complete | Contributions are tracked per member |
+| Automatic cart synchronization | Complete | WebSocket updates are flushed every 60 seconds |
+| Shared delivery addresses | Mostly complete | Edit address, select default address and address-level permissions |
+| Primary revokes access | Complete | Member and cart access can be revoked |
+| Individual personal cart | Complete | — |
+| Individual shopping history | Missing | Orders, order items and per-user purchase history |
+| Account preferences | Missing | Language, notifications, preferred address/store and substitutions |
+| Payment methods | Missing | Secure payment-provider integration and primary-only RBAC |
+| Checkout/orders | Missing | Checkout, inventory validation, order creation and payment status |
+| Household dashboard | Mostly complete | Pending invites, permission editor and activity/audit history |

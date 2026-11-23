@@ -1,0 +1,56 @@
+services:
+  user-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: familycart_users
+      POSTGRES_USER: familycart_user
+      POSTGRES_PASSWORD: familycart_local_password
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - familycart-user-data:/var/lib/postgresql/data
+      - ./backend/services/user_service/postgres_schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U familycart_user -d familycart_users"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  familycart-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: familycart
+      POSTGRES_USER: familycart_app
+      POSTGRES_PASSWORD: familycart_local_password
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - familycart-household-data:/var/lib/postgresql/data
+      - ./backend/services/familycart_service/postgres_schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+      - ./backend/services/familycart_service/seed.sql:/docker-entrypoint-initdb.d/002-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U familycart_app -d familycart"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - familycart-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  familycart-user-data:
+  familycart-household-data:
+  familycart-redis-data:

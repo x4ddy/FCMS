@@ -3,9 +3,9 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, TypeAdapter
 
-from shared.tokens import Identity
+from backend.shared.tokens import Identity
 
-CATALOGUE_PATH = Path(__file__).resolve().parents[1] / "product" / "catalog.json"
+CATALOGUE_PATH = Path(__file__).resolve().parents[1] / "product_service" / "catalog.json"
 
 
 class Product(BaseModel):

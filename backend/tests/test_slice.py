@@ -10,11 +10,12 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from auth.app import app as auth_app
-from familycart.app import app as familycart_app
-from shared.tokens import Identity, issue_token
+from backend.services.auth_service.app import app as auth_app
+from backend.services.auth_service.google_auth import GoogleIdentity, InvalidGoogleCredential
+from backend.services.familycart_service.app import app as familycart_app
+from backend.shared.tokens import Identity, issue_token
 
-CARTS_URL = "/households/demo-household/carts"
+CARTS_URL = "/api/v1/households/demo-household/carts"
 
 
 class FirstSliceTests(unittest.TestCase):
@@ -28,15 +29,26 @@ class FirstSliceTests(unittest.TestCase):
                 {
                     "FAMILYCART_DB_PATH": str(self.db_path),
                     "FAMILYCART_JWT_SECRET": self.secret,
+                    "FAMILYCART_GOOGLE_CLIENT_ID": "test.apps.googleusercontent.com",
                 },
             )
         )
+        identities = {
+            "primary@example.test": GoogleIdentity("user-primary", "primary@gmail.com", "Primary Customer", True),
+            "demo-child": GoogleIdentity("user-child", "child@gmail.com", "Child Member"),
+            "adult@example.test": GoogleIdentity("user-adult", "adult@gmail.com", "Adult Member", True),
+        }
+        self.enterContext(patch(
+            "backend.services.auth_service.app.verify_google_credential",
+            side_effect=lambda credential, _client_id: identities.get(credential[:credential.index("|")])
+            or (_ for _ in ()).throw(InvalidGoogleCredential("Google sign-in could not be verified")),
+        ))
         self.auth = self.enterContext(TestClient(auth_app))
         self.familycart = self.enterContext(TestClient(familycart_app))
 
     def sign_in(self, identifier: str, password: str, user_id: str) -> dict[str, str]:
         response = self.auth.post(
-            "/auth/login", json={"identifier": identifier, "password": password}
+            "/api/v1/auth/google", json={"credential": f"{identifier}|" + "x" * 100}
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -77,7 +89,7 @@ class FirstSliceTests(unittest.TestCase):
     def test_missing_or_invalid_token_returns_401(self) -> None:
         identity = Identity(user_id="user-primary", is_adult=True)
         wrong_signature = issue_token(identity, secrets.token_hex(32))
-        with patch("shared.tokens.datetime") as clock:
+        with patch("backend.shared.tokens.datetime") as clock:
             clock.now.return_value = datetime.now(timezone.utc) - timedelta(hours=1)
             expired_token = issue_token(identity, self.secret)
 
@@ -95,14 +107,12 @@ class FirstSliceTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.headers["www-authenticate"], "Bearer")
 
-    def test_wrong_password_and_unknown_account_get_same_error(self) -> None:
-        for identifier in ("demo-child", "unknown-user"):
-            with self.subTest(identifier=identifier):
-                response = self.auth.post(
-                    "/auth/login", json={"identifier": identifier, "password": "wrong"}
-                )
-                self.assertEqual(response.status_code, 401)
-                self.assertEqual(response.json(), {"detail": "Invalid credentials"})
+    def test_invalid_google_credential_is_rejected(self) -> None:
+        response = self.auth.post(
+            "/api/v1/auth/google", json={"credential": "unknown-user|" + "x" * 100}
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"detail": "Google sign-in could not be verified"})
 
     def test_current_membership_is_checked_with_the_same_token(self) -> None:
         headers = self.sign_in("primary@example.test", "primary-demo-2026", "user-primary")

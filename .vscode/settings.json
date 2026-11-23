@@ -1,4 +1,7 @@
 {
+  "files.associations": {
+    "backend/services/**/*.sql": "sql"
+  },
   "git.openRepositoryInParentFolders": "never",
   "git.ignoredRepositories": ["../../.."]
 }

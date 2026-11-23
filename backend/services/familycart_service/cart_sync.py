@@ -1,31 +1,37 @@
 import asyncio
 import json
 import logging
-import sqlite3
 from collections import defaultdict
 from hashlib import sha256
-from pathlib import Path
 
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import RedisError
 
+from backend.shared.database import DatabaseConnection, DatabaseTarget, database_error_types
+
 from .db import load_contributions, transaction
 
-SYNC_INTERVAL = 10
+SYNC_INTERVAL = 60
 STAGING_INTERVAL = 0.25
 logger = logging.getLogger(__name__)
 
 
-def latest_revision(db: sqlite3.Connection) -> int:
+def latest_revision(db: DatabaseConnection) -> int:
+    if db.dialect == "postgresql":
+        row = db.execute("SELECT last_value, is_called FROM cart_sync_events_id_seq").fetchone()
+        return row["last_value"] if row["is_called"] else 0
     row = db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'cart_sync_events'").fetchone()
     return row["seq"] if row else 0
 
 
+SYNC_ERRORS = (RedisError,) + database_error_types()
+
+
 class CartSync:
-    def __init__(self, db_path: Path, redis_url: str):
+    def __init__(self, db_path: DatabaseTarget, redis_url: str):
         self.db_path = db_path
-        namespace = sha256(str(db_path.resolve()).encode()).hexdigest()[:16]
+        namespace = sha256(str(db_path).encode()).hexdigest()[:16]
         self.namespace = f"familycart:{namespace}"
         self.stash = f"{self.namespace}:pending"
         options = {"decode_responses": True, "socket_connect_timeout": 1, "socket_timeout": 3}
@@ -90,7 +96,7 @@ class CartSync:
                 else:
                     self.staged_through, _ = await asyncio.to_thread(self.stage, self.staged_through)
                 failed = False
-            except (RedisError, sqlite3.OperationalError) as error:
+            except SYNC_ERRORS as error:
                 if not failed:
                     logger.warning("Cart synchronization will retry: %s", error)
                 failed = True
