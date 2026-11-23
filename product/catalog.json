@@ -1,0 +1,206 @@
+[
+  {
+    "sku": "milk",
+    "name": "Almarai Fresh Milk Full Fat, 1 L",
+    "category": "Milk, Eggs & Dairy",
+    "price_fils": 750,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/07/11/1897/0390d365-1229-492d-9349-12196eafaaca_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/almarai-fresh-milk-full-fat-1-litre/p/7549/"
+  },
+  {
+    "sku": "eggs",
+    "name": "Jenan Large White Eggs, 15 pcs",
+    "category": "Milk, Eggs & Dairy",
+    "price_fils": 1275,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/06/27/69533/8f3c2dc4-b334-4a48-ae7f-1bcb6846db8e_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/jenan-white-eggs-large-15-pcs/p/972840/"
+  },
+  {
+    "sku": "bread",
+    "name": "Lusine Sliced Milk Bread, 275 g",
+    "category": "Bakery",
+    "price_fils": 390,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/12/11/149669/2124f3aa-d8f0-4250-8abb-d2f5abbf6389_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/lusine-sliced-milk-bread-275-g/p/1526125/"
+  },
+  {
+    "sku": "yoghurt",
+    "name": "Almarai Full Cream Yoghurt, 1 kg",
+    "category": "Milk, Eggs & Dairy",
+    "price_fils": 790,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/04/05/53908/c3d46dfe-82ac-4fe1-8a06-52e1be3466d5_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/almarai-fresh-yoghurt-full-cream-1-kg/p/486998/"
+  },
+  {
+    "sku": "whole-chicken",
+    "name": "Alyoum Fresh Whole Chicken, 1 kg",
+    "category": "Meat & Poultry",
+    "price_fils": 2475,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/08/25/72177/e1de11ac-945a-4301-93e5-8c7858a6f3f0_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/alyoum-fresh-whole-chicken-1-kg/p/456965/?convtobuom=1"
+  },
+  {
+    "sku": "gala-apples",
+    "name": "Royal Gala Apples, 1 kg",
+    "category": "Fruit & Vegetables",
+    "price_fils": 995,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/12/16/146023/3471850b-7459-4776-9df0-e3975d01b454_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/royal-gala-apple-italy-1-kg/p/197289-ea/?convtobuom=1000"
+  },
+  {
+    "sku": "bananas",
+    "name": "Chiquita Bananas, 1 kg",
+    "category": "Fruit & Vegetables",
+    "price_fils": 895,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/10/01/145634/067712f2-3dfa-40d1-afe0-8c0bda925272_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/p/380260-ea/?convtobuom=1000"
+  },
+  {
+    "sku": "carrots",
+    "name": "Australian Carrots, 500 g",
+    "category": "Fruit & Vegetables",
+    "price_fils": 533,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/10/01/151070/a8e70433-5d8b-41d6-afdc-c1afdb3af9c2_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/p/18892-ea/?convtobuom=500"
+  },
+  {
+    "sku": "tomatoes",
+    "name": "Jordanian Tomatoes, 500 g",
+    "category": "Fruit & Vegetables",
+    "price_fils": 348,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/10/01/150875/f2be79fb-1e85-46bc-a896-513ddc294e26_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/p/372444-ea/?convtobuom=500"
+  },
+  {
+    "sku": "basmati-rice",
+    "name": "India Gate Classic Basmati Rice, 1 kg",
+    "category": "Pantry",
+    "price_fils": 1525,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/04/21/76142/b785e270-c194-4ae6-ae4c-d3b730949b5d_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/india-gate-classic-basmati-rice-1-kg/p/404467/"
+  },
+  {
+    "sku": "spaghetti",
+    "name": "Barilla Spaghetti No. 5, 500 g",
+    "category": "Pantry",
+    "price_fils": 1125,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2026/10/23/62330/3fa70440-d76b-41fe-8e3a-8026eb2ca695_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/barilla-spaghetti-no-5-500-g/p/15689"
+  },
+  {
+    "sku": "corn-flakes",
+    "name": "Kellogg's Original Corn Flakes, 500 g",
+    "category": "Pantry",
+    "price_fils": 2365,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2026/03/16/95079/e920ca7a-176b-4b1c-a673-9d8adbb0f5e7_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/kellogg-s-corn-flakes-the-original-500-g/p/52407/"
+  },
+  {
+    "sku": "oats",
+    "name": "Quaker Quick Cooking White Oats, 500 g",
+    "category": "Pantry",
+    "price_fils": 950,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/09/11/91110/636c1211-3c5b-4a43-b7ef-ef331969cad2_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/quaker-quick-cooking-white-oats-500-g/p/347347/"
+  },
+  {
+    "sku": "honey",
+    "name": "Al Shifa Natural Honey, 400 g",
+    "category": "Pantry",
+    "price_fils": 3245,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/12/31/66351/fd3dc8b2-239d-4739-b1d9-127e84d435f3_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/al-shifa-natural-honey-400-g/p/794520/"
+  },
+  {
+    "sku": "drinking-water",
+    "name": "LuLu Bottled Drinking Water, 6 × 1.5 L",
+    "category": "Drinks",
+    "price_fils": 605,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/04/02/92285/20a947c4-8173-4254-a057-9cc3def7883c_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/lulu-bottled-drinking-water-6-15-litres/p/347357/"
+  },
+  {
+    "sku": "orange-juice",
+    "name": "Al Ain Farms Orange Juice, 1.5 L",
+    "category": "Drinks",
+    "price_fils": 1195,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/09/10/84069/9a7d3172-b196-42c8-a770-826df2e4cc88_size1920x1920_cropCenter.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/al-ain-farms-orange-juice-1-5-litres/p/1763781"
+  },
+  {
+    "sku": "chickpeas",
+    "name": "California Garden Canned Chickpeas, 400 g",
+    "category": "Pantry",
+    "price_fils": 450,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2025/11/10/70128/7902b8e3-c215-48bc-9bba-ec9eca125997_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/california-garden-canned-cooked-chickpeas-400-g/p/13750/"
+  },
+  {
+    "sku": "mixed-vegetables",
+    "name": "LuLu Frozen Mixed Vegetables, 400 g",
+    "category": "Frozen",
+    "price_fils": 510,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/09/06/57832/e123b33f-953e-4627-afeb-b05d608b249e_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/lulu-frozen-mixed-vegetables-400-g/p/497549"
+  },
+  {
+    "sku": "dishwashing-liquid",
+    "name": "LuLu Lemon Dishwashing Liquid, 500 ml",
+    "category": "Household",
+    "price_fils": 510,
+    "currency": "AED",
+    "min_age": 0,
+    "image_url": "https://bf1af2.akinoncloudcdn.com/products/2024/09/10/83124/2233d9e0-8a85-45b8-b92d-5d154149cc34_size1920x1920.jpg",
+    "price_source_url": "https://gcc.luluhypermarket.com/en-ae/lulu-dishwashing-liquid-lemon-500-ml/p/436009/"
+  },
+  {
+    "sku": "cigarette-pack-20",
+    "name": "Cigarette - Pack of 20",
+    "category": "Tobacco",
+    "price_fils": 2200,
+    "currency": "AED",
+    "min_age": 18,
+    "fictional": true,
+    "image_url": "https://thumb.wikimedia.org/wikipedia/commons/thumb/2/27/Blank_cigarette_packet_with_logo_removed_and_cigarettes_sticking_out.JPG/960px-Blank_cigarette_packet_with_logo_removed_and_cigarettes_sticking_out.JPG",
+    "price_source_url": "https://cdn.who.int/media/docs/default-source/country-profiles/tobacco/gtrc-2025/tobacco-2025-are.pdf?download=true",
+    "price_source_year": 2024,
+    "image_source_url": "https://commons.wikimedia.org/wiki/File:Blank_cigarette_packet_with_logo_removed_and_cigarettes_sticking_out.JPG",
+    "image_credit": "Kiwiev / Wikimedia Commons (CC0 1.0)"
+  }
+]
