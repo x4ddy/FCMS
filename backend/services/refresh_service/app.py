@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 from backend.services.user_service.db import database_path, initialize_database
 from backend.shared.api import API_PREFIX
+from backend.shared.database import database_error_types
 from backend.shared.tokens import load_jwt_secret, verify_token
 
 from .cookies import REFRESH_COOKIE, clear_refresh_cookie, set_refresh_cookie
@@ -17,6 +19,15 @@ from .service import (
     revoke_session,
     rotate_session,
 )
+
+
+logger = logging.getLogger(__name__)
+DATABASE_ERRORS = database_error_types()
+
+
+def temporarily_unavailable(detail: str, error: Exception) -> HTTPException:
+    logger.warning("Session database unavailable: %s", type(error).__name__)
+    return HTTPException(status_code=503, detail=detail, headers={"Retry-After": "5", "Cache-Control": "no-store"})
 
 
 class SignedInUser(BaseModel):
@@ -72,6 +83,9 @@ def refresh(
     except InvalidRefreshToken as error:
         clear_refresh_cookie(response)
         raise HTTPException(status_code=401, detail=str(error)) from None
+    except DATABASE_ERRORS as error:
+        # Not a verdict on the session, so the cookie is kept for another try.
+        raise temporarily_unavailable("Your session could not be checked. Try again shortly.", error) from None
     set_refresh_cookie(response, tokens.refresh_token)
     response.headers["Cache-Control"] = "no-store"
     return RefreshResponse(
@@ -104,7 +118,11 @@ def logout(
                 session_ids.add(identity.session_id)
         except InvalidTokenError:
             pass
-    for session_id in session_ids:
-        revoke_session(request.app.state.user_db_path, session_id)
+    try:
+        for session_id in session_ids:
+            revoke_session(request.app.state.user_db_path, session_id)
+    except DATABASE_ERRORS as error:
+        # Keep the cookie: the session is still active, so saying otherwise would mislead.
+        raise temporarily_unavailable("Sign-out could not be completed. Try again shortly.", error) from None
     clear_refresh_cookie(response)
     response.headers["Cache-Control"] = "no-store"

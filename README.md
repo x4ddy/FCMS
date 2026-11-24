@@ -138,12 +138,29 @@ When nothing changes, the worker does not touch the database at all. A slow swee
 (`FAMILYCART_SYNC_SWEEP_SECONDS`, default 300) recovers any note lost during a Redis outage.
 
 Other load savers: PostgreSQL connections are pooled (`FAMILYCART_DB_POOL_MIN/MAX`),
-the gateway caches "session is active" for `FAMILYCART_SESSION_CACHE_SECONDS` (logout
-clears it immediately), fast `+`/`−` taps are combined into one request, and pasted
+the gateway caches "session is active" (see Login session checks), fast `+`/`−` taps are combined into one request, and pasted
 lists are added with one bulk request.
 
 One Redis serves everything today. Caches can be moved to a separate instance later by
 setting `FAMILYCART_CACHE_REDIS_URL`; no code changes are needed.
+
+## Login session checks
+
+The Gateway checks every access token's signature, then whether its session is still active:
+
+| Level | Examples | Checked in |
+|---|---|---|
+| Normal | View, cart items, list items | Gateway memory (5 s), then Redis, then `user-db` |
+| Sensitive | Invitations, cart access, addresses, checkout review, WebSockets, **any unlisted route** | Redis, then `user-db` |
+| Critical | Remove member, transfer ownership, place order, save date of birth | `user-db` |
+
+Routes are classified in `backend/api_gateway/route_policy.py`. Services still check permissions themselves.
+
+Logout commits to `user-db`, writes a "revoked" marker to Redis for 15 minutes and publishes a message.
+Each Gateway then forgets the session and closes its WebSockets. Pub/Sub can miss a Gateway, so its
+5-second memory is the backstop. If Redis could not be told, sensitive routes may accept the session
+for up to `FAMILYCART_SESSION_CACHE_SECONDS` (default 30) and normal routes 5 seconds longer; critical
+routes refuse it at once. With Redis down the database decides; with both down the Gateway returns 503.
 
 ## API v1
 

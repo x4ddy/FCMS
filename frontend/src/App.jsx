@@ -533,8 +533,12 @@ function App() {
     let cancelled = false
     restoreSession()
       .then((signedIn) => cancelled ? undefined : hydrateSession(signedIn))
-      .catch(() => {
-        if (!cancelled) clearSession()
+      .catch((error) => {
+        if (cancelled) return
+        clearSession()
+        if (error.status !== 401) {
+          setFeedback({ error: true, text: 'Your session could not be restored right now. Reload the page to try again.' })
+        }
       })
       .finally(() => {
         if (!cancelled) setRestoringSession(false)
@@ -596,7 +600,10 @@ function App() {
         if (code === 4401) {
           // Access tokens expire after 10 minutes. Refreshing publishes the new
           // token, which causes this effect to reconnect the socket securely.
-          try { await refreshAccessToken() } catch { /* The token listener clears the session. */ }
+          try { await refreshAccessToken() } catch (error) {
+            // On 401 the token listener clears the session; otherwise try again.
+            if (error.status !== 401 && !stopped) reconnect = window.setTimeout(connect, 2000)
+          }
         }
         else if (code === 4404) {
           const personalCart = await accountApi(token).personalCart().catch(() => ({ items: [] }))
@@ -879,7 +886,8 @@ function App() {
               <button className="secondary" onClick={() => openPage('addresses')}>Addresses</button>
             </>}
             <button className="secondary" disabled={busy} onClick={() => run(async () => {
-              try { await logoutSession(token) } finally { clearSession() }
+              await logoutSession(token)
+              clearSession()
             })}>Sign out</button></div> :
             !restoringSession && <button className="header-login" onClick={() => setAuthOpen(true)}>Login / Register</button>}
           {session && household && !needsAgeSetup && <button className="header-lists" onClick={() => openPage('lists')}>

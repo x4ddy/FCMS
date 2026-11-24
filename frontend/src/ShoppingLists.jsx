@@ -464,7 +464,13 @@ export function ShoppingLists({
       socket.onclose = async ({ code, reason }) => {
         setLive(false)
         if (stopped) return
-        if (code === 4401) { try { await refreshAccessToken() } catch { /* session cleared upstream */ } return }
+        if (code === 4401) {
+          try { await refreshAccessToken() } catch (error) {
+            // On 401 the session is cleared upstream; otherwise try again.
+            if (error.status !== 401 && !stopped) retry = window.setTimeout(() => { if (!stopped) connect() }, 2000)
+          }
+          return
+        }
         if (code === 4404) { accessLost(reason); return }
         retry = window.setTimeout(() => { if (!stopped) connect() }, 2000)
       }

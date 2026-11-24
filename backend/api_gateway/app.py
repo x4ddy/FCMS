@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time
 from collections import defaultdict, deque
@@ -14,15 +15,21 @@ from jwt import InvalidTokenError
 from pydantic import ValidationError
 from starlette.responses import Response
 
-from backend.services.refresh_service.service import session_is_active
-from backend.shared.cache import RedisError, async_client, cache_breaker, cache_redis_url, session_cache_seconds, session_key
 from backend.services.user_service.db import database_path, initialize_database
 from backend.shared.api import API_PREFIX
+from backend.shared.cache import async_client, cache_redis_url, session_hash
 from backend.shared.maps import Coordinates, MAPS_UNAVAILABLE, maps_service_url
-from backend.shared.tokens import load_jwt_secret, verify_token
+from backend.shared.tokens import Identity, load_jwt_secret, verify_token
+
+from .route_policy import Level, classify, is_ambiguous
+from .session_auth import AuthUnavailable, SessionEnded, SessionValidator
 
 
+LOGGER = logging.getLogger(__name__)
 MAX_BODY_BYTES = 1024 * 1024
+MAX_LIMITER_ENTRIES = 50_000
+SWEEP_SECONDS = 5
+SOCKET_RECHECK_SECONDS = 30
 PUBLIC_AUTH = {"auth/google", "auth/google/config"}
 MAP_ROUTES = {"maps/stores": "GET", "maps/resolve": "POST"}
 HOP_BY_HOP = {
@@ -43,7 +50,14 @@ class SlidingWindowLimiter:
         if len(bucket) >= limit:
             return False
         bucket.append(now)
+        if len(self.requests) > MAX_LIMITER_ENTRIES:
+            self.requests.pop(next(iter(self.requests)))
         return True
+
+    def sweep(self, window_seconds: int = 60) -> None:
+        cutoff = time.monotonic() - window_seconds
+        for key in [key for key, bucket in self.requests.items() if not bucket or bucket[-1] <= cutoff]:
+            del self.requests[key]
 
 
 def _target_for(path: str, app: FastAPI) -> str:
@@ -81,31 +95,7 @@ def _bearer_token(authorization: str | None) -> str:
     return authorization[7:]
 
 
-async def _session_active(app: FastAPI, session_id: str, user_id: str) -> bool:
-    """Is this login session still active? Cached briefly in Redis so most requests skip the user database.
-
-    Logout clears the cache entry immediately (see refresh_service.service.revoke_session),
-    so caching only delays changes made directly in the database, by at most the cache lifetime.
-    """
-    ttl = session_cache_seconds()
-    cache = app.state.cache
-    key = session_key(session_id)
-    if ttl and cache_breaker.available():
-        try:
-            if await cache.get(key) == user_id:
-                return True
-        except RedisError as error:
-            cache_breaker.failed(error)
-    active = await asyncio.to_thread(session_is_active, app.state.user_db_path, session_id, user_id)
-    if active and ttl and cache_breaker.available():
-        try:
-            await cache.set(key, user_id, ex=ttl)
-        except RedisError as error:
-            cache_breaker.failed(error)
-    return active
-
-
-async def _validate_access(app: FastAPI, token: str) -> None:
+async def _validate_access(app: FastAPI, token: str, level: Level) -> Identity:
     try:
         identity = verify_token(token, app.state.jwt_secret)
     except InvalidTokenError:
@@ -114,12 +104,28 @@ async def _validate_access(app: FastAPI, token: str) -> None:
             detail="Missing or invalid bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
-    if not identity.session_id or not await _session_active(app, identity.session_id, identity.user_id):
+    try:
+        await app.state.sessions.validate(identity, level)
+    except SessionEnded:
         raise HTTPException(
             status_code=401,
             detail="Session has ended",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
+    except AuthUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Your sign-in could not be checked. Try again shortly.",
+            headers={"Retry-After": "5", "Cache-Control": "no-store"},
+        ) from None
+    return identity
+
+
+async def _sweep(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(SWEEP_SECONDS)
+        app.state.limiter.sweep()
+        app.state.sessions.local.sweep()
 
 
 def _validate_origin(request: Request) -> None:
@@ -146,12 +152,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
     maps_http = app.state.maps_http = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=1), trust_env=False)
     app.state.limiter = SlidingWindowLimiter()
-    app.state.cache = async_client(cache_redis_url())
+    subscriber = async_client(cache_redis_url(), socket_timeout=5, health_check_interval=5)
+    app.state.sessions = SessionValidator(app.state.user_db_path, async_client(cache_redis_url()), subscriber)
+    app.state.sessions.start()
+    sweeper = asyncio.create_task(_sweep(app))
     try:
         yield
     finally:
         await app.state.http.aclose()
-        await app.state.cache.aclose()
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
+        await app.state.sessions.close()
         await maps_http.aclose()
 
 
@@ -181,6 +193,8 @@ def health() -> dict[str, str]:
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 )
 async def proxy(path: str, request: Request) -> Response:
+    if is_ambiguous(path):
+        raise HTTPException(status_code=400, detail="Invalid request path")
     client_ip = request.client.host if request.client else "unknown"
     sensitive = path in {
         "auth/google", "auth/age", "sessions/refresh",
@@ -199,7 +213,9 @@ async def proxy(path: str, request: Request) -> Response:
         _validate_origin(request)
 
     if path not in PUBLIC_AUTH and not path.startswith("sessions/"):
-        await _validate_access(request.app, _bearer_token(request.headers.get("authorization")))
+        await _validate_access(
+            request.app, _bearer_token(request.headers.get("authorization")), classify(request.method, path),
+        )
 
     content_length = request.headers.get("content-length")
     if content_length:
@@ -221,13 +237,23 @@ async def proxy(path: str, request: Request) -> Response:
     }
     headers["X-Forwarded-For"] = client_ip
     headers["X-Request-ID"] = request.headers.get("x-request-id") or str(uuid4())
-    upstream = await request.app.state.http.request(
-        request.method,
-        f"{target}{API_PREFIX}/{path}",
-        params=request.query_params,
-        content=body,
-        headers=headers,
-    )
+    try:
+        upstream = await request.app.state.http.request(
+            request.method,
+            f"{target}{API_PREFIX}/{path}",
+            params=request.query_params,
+            content=body,
+            headers=headers,
+        )
+    except httpx.ReadTimeout:
+        # The service received it, so whether it took effect is unknown.
+        raise HTTPException(status_code=504, detail="The service took too long to answer. Try again.") from None
+    except httpx.RequestError as error:
+        LOGGER.warning("Service unavailable: %s", type(error).__name__)
+        raise HTTPException(
+            status_code=503, detail="The service is temporarily unavailable. Try again shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
     response_headers = {
         name: value for name, value in upstream.headers.items()
         if name.lower() not in HOP_BY_HOP and name.lower() in {
@@ -264,14 +290,44 @@ async def websocket_proxy(websocket: WebSocket, path: str) -> None:
         token = payload.get("token") if isinstance(payload, dict) else None
         if not isinstance(token, str):
             raise ValueError
-        await _validate_access(websocket.app, token)
-    except (asyncio.TimeoutError, json.JSONDecodeError, ValueError, HTTPException):
+        if is_ambiguous(path):
+            raise ValueError
+        identity = await _validate_access(websocket.app, token, Level.SENSITIVE)
+    except HTTPException as error:
+        # 4401 makes the browser renew its token; 1013 means "try again later".
+        await websocket.close(code=1013 if error.status_code == 503 else 4401)
+        return
+    except (asyncio.TimeoutError, json.JSONDecodeError, ValueError):
         await websocket.close(code=4401)
         return
 
     target = websocket.app.state.familycart_url.replace("http://", "ws://").replace("https://", "wss://")
     query = f"?{websocket.url.query}" if websocket.url.query else ""
+    sessions: SessionValidator = websocket.app.state.sessions
+    revoked = sessions.watch(identity)
+
+    async def close_when_session_ends() -> None:
+        while True:
+            try:
+                await asyncio.wait_for(revoked.wait(), SOCKET_RECHECK_SECONDS)
+                code = 4401
+            except asyncio.TimeoutError:
+                # A logout message may have been missed.
+                try:
+                    await sessions.recheck_socket(identity)
+                    continue
+                except SessionEnded:
+                    code = 4401
+                except AuthUnavailable:
+                    code = 1013
+            with suppress(RuntimeError):
+                await websocket.close(code=code)
+            return
+
     try:
+        # A logout between the check and watch() is caught by this second look.
+        if sessions.local.is_revoked(session_hash(identity.session_id)):
+            revoked.set()
         async with websockets.connect(
             f"{target}{API_PREFIX}/households/{path}{query}"
         ) as upstream:
@@ -293,7 +349,8 @@ async def websocket_proxy(websocket: WebSocket, path: str) -> None:
                     with suppress(RuntimeError):
                         await websocket.close(code=code, reason=error.reason)
 
-            tasks = [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client())]
+            tasks = [asyncio.create_task(client_to_upstream()), asyncio.create_task(upstream_to_client()),
+                     asyncio.create_task(close_when_session_ends())]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in pending:
                 task.cancel()
@@ -303,3 +360,5 @@ async def websocket_proxy(websocket: WebSocket, path: str) -> None:
     except (OSError, websockets.WebSocketException, WebSocketDisconnect):
         with suppress(RuntimeError):
             await websocket.close(code=1011)
+    finally:
+        sessions.unwatch(identity, revoked)

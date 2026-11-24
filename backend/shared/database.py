@@ -114,7 +114,11 @@ def _pool_for(url: str):
                 max_lifetime=1800,
                 max_idle=300,
                 check=ConnectionPool.check_connection,
-                kwargs={"row_factory": dict_row},
+                # Give up on a dead database quickly and let the next request try again.
+                # The default keeps doubling its delay for five minutes, so a service
+                # could stay broken long after the database came back.
+                reconnect_timeout=5,
+                kwargs={"row_factory": dict_row, "connect_timeout": 3},
                 name=f"familycart-{len(_pools) + 1}",
                 open=True,
             )

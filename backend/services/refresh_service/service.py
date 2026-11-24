@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from backend.services.user_service.db import connect, transaction, upsert_user
-from backend.shared.cache import forget_session
+from backend.shared.cache import announce_revocation
 from backend.shared.database import DatabaseTarget
 from backend.shared.tokens import ACCESS_TOKEN_LIFETIME, Identity, issue_token
 
@@ -145,7 +145,7 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
                     (now.isoformat(), session_id),
                 )
                 database.commit()
-                forget_session(session_id)
+                announce_revocation(session_id)
                 raise RefreshTokenReuse("Invalid or expired session")
             raise InvalidRefreshToken("Invalid or expired session")
 
@@ -190,9 +190,45 @@ def revoke_session(path: DatabaseTarget, session_id: str) -> None:
             "UPDATE refresh_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE session_id = ?",
             (now, session_id),
         )
-    # The gateway caches "this session is active" briefly; clear it so the
-    # logout applies to the very next request rather than after the cache expires.
-    forget_session(session_id)
+    # Only after the commit: the database is the official record.
+    announce_revocation(session_id)
+
+
+@dataclass(frozen=True)
+class SessionStatus:
+    active: bool
+    revoked: bool = False
+    ends_at: float = 0.0
+
+
+def session_status(path: DatabaseTarget, session_id: str, user_id: str) -> SessionStatus:
+    """The authoritative answer, with enough detail for the Gateway to cache it safely."""
+    with closing(connect(path)) as database:
+        if database.dialect == "postgresql":
+            database.execute("SET LOCAL statement_timeout = 2000")
+        row = database.execute(
+            """SELECT s.revoked_at, s.absolute_expires_at, u.status
+               FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
+               WHERE s.session_id = ? AND s.user_id = ?""",
+            (session_id, user_id),
+        ).fetchone()
+    if row is None:
+        return SessionStatus(False)
+    if row["revoked_at"] is not None:
+        return SessionStatus(False, revoked=True)
+    ends_at = datetime.fromisoformat(row["absolute_expires_at"]).timestamp()
+    active = row["status"] == "ACTIVE" and ends_at > datetime.now(timezone.utc).timestamp()
+    return SessionStatus(active, ends_at=ends_at)
+
+
+def recently_revoked(path: DatabaseTarget, seconds: int) -> list[str]:
+    since = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    with closing(connect(path)) as database:
+        if database.dialect == "postgresql":
+            database.execute("SET LOCAL statement_timeout = 2000")
+        return [row["session_id"] for row in database.execute(
+            "SELECT session_id FROM refresh_sessions WHERE revoked_at > ?", (since,),
+        ).fetchall()]
 
 
 def session_is_active(path: DatabaseTarget, session_id: str, user_id: str) -> bool:

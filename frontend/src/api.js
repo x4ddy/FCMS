@@ -32,7 +32,8 @@ async function requestRefreshedSession() {
   })
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.access_token) {
-    publishAccessToken(null)
+    // Only a definite "no" ends the session. A server problem is not a verdict.
+    if (response.status === 401) publishAccessToken(null)
     throw new ApiError(response.status, typeof data?.detail === 'string' ? data.detail : 'Your session ended.')
   }
   publishAccessToken(data.access_token, data.user)
@@ -101,9 +102,13 @@ export function googleConfiguration() {
 export async function logoutSession(token) {
   try {
     await request(`${api}/sessions/logout`, { token, method: 'POST', retry: false })
-  } finally {
-    publishAccessToken(null)
+  } catch (error) {
+    // 401: the session has already ended. Anything else: it may still be active.
+    if (error.status !== 401) {
+      throw new ApiError(error.status ?? 0, 'Sign-out could not be completed, so you are still signed in. Try again.')
+    }
   }
+  publishAccessToken(null)
 }
 
 function addressApi(token, path) {
