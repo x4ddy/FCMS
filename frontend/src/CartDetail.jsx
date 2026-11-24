@@ -64,7 +64,7 @@ function Catalogue({ products, cart, user, busy, onAdjustQuantity, onRemoveItem 
 
 export function CartDetail({
   cart, user, members, grants, busy, products,
-  onAdjustQuantity, onRemoveItem, onChangeGrant, onDeleteCart,
+  onAdjustQuantity, onRemoveItem, onChangeGrant, onDeleteCart, onCheckout,
 }) {
   const names = new Map(members.map((member) => [member.id, member.display_name]))
   names.set(user.id, user.display_name)
@@ -83,6 +83,9 @@ export function CartDetail({
         <h1>{cart.name}</h1>
         <div className="contribution-actions">
           {cart.adults_only && <span className="tag">Adults only</span>}
+          {cart.can_manage_access && sharedItems.length > 0 && <button disabled={busy} onClick={onCheckout}>
+            Checkout
+          </button>}
           {cart.can_delete_cart && <button className="secondary danger" disabled={busy}
             onClick={() => {
               if (window.confirm(`Delete “${cart.name}” and all its items?`)) onDeleteCart()

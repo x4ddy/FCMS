@@ -47,8 +47,9 @@ class FirstSliceTests(unittest.TestCase):
         self.familycart = self.enterContext(TestClient(familycart_app))
 
     def sign_in(self, identifier: str, password: str, user_id: str) -> dict[str, str]:
+        birth = f"{datetime.now(timezone.utc).year - 10}-01-01" if user_id == "user-child" else "2000-01-01"
         response = self.auth.post(
-            "/api/v1/auth/google", json={"credential": f"{identifier}|" + "x" * 100}
+            "/api/v1/auth/google", json={"credential": f"{identifier}|" + "x" * 100, "date_of_birth": birth},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()

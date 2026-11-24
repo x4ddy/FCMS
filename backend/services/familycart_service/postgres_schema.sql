@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS household_addresses (
     city TEXT NOT NULL,
     postal_code TEXT,
     phone TEXT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -85,6 +87,8 @@ CREATE TABLE IF NOT EXISTS user_addresses (
     city TEXT NOT NULL,
     postal_code TEXT,
     phone TEXT,
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Migrate databases created by the former phone/OTP authentication flow.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT UNIQUE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS google_subject TEXT UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS date_of_birth TEXT;
 
 CREATE TABLE IF NOT EXISTS refresh_sessions (
     session_id TEXT PRIMARY KEY,

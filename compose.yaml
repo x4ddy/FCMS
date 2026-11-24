@@ -11,7 +11,7 @@ services:
       - familycart-user-data:/var/lib/postgresql/data
       - ./backend/services/user_service/postgres_schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U familycart_user -d familycart_users"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U familycart_user -d familycart_users"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -30,7 +30,7 @@ services:
       - ./backend/services/familycart_service/postgres_schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
       - ./backend/services/familycart_service/seed.sql:/docker-entrypoint-initdb.d/002-seed.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U familycart_app -d familycart"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U familycart_app -d familycart"]
       interval: 5s
       timeout: 3s
       retries: 10

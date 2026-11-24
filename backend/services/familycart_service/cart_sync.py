@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-from collections import defaultdict
 from hashlib import sha256
 
 from redis import Redis
@@ -25,6 +24,16 @@ def latest_revision(db: DatabaseConnection) -> int:
     return row["seq"] if row else 0
 
 
+def household_revision(db: DatabaseConnection, household_id: str) -> int:
+    return db.execute(
+        """SELECT COALESCE(MAX(revisions.revision), 0) AS revision
+           FROM carts JOIN checkout_cart_revisions AS revisions
+             ON revisions.cart_id = carts.id AND revisions.kind = 'household'
+           WHERE carts.household_id = ?""",
+        (household_id,),
+    ).fetchone()["revision"]
+
+
 SYNC_ERRORS = (RedisError,) + database_error_types()
 
 
@@ -42,7 +51,7 @@ class CartSync:
     def channel(self, household_id: str) -> str:
         return f"{self.namespace}:household:{household_id}"
 
-    def stage(self, after: int) -> tuple[int, dict[str, dict[str, str | None]]]:
+    def stage(self, after: int) -> tuple[int, dict]:
         with transaction(self.db_path) as db:
             events = db.execute(
                 "SELECT id, household_id, cart_id, actor_id FROM cart_sync_events WHERE id > ? ORDER BY id",
@@ -50,37 +59,45 @@ class CartSync:
             ).fetchall()
             if not events:
                 return after, {}
-            carts_by_household = defaultdict(dict)
+            households = {}
             staged = {}
             for event in events:
                 # Events are ordered, so this keeps the actor responsible for
                 # the most recent visible change to each cart in this batch.
-                carts_by_household[event["household_id"]][event["cart_id"]] = event["actor_id"]
-            for cart_ids in carts_by_household.values():
-                for cart_id in cart_ids:
+                household = households.setdefault(event["household_id"], {"actors": {}})
+                household["revision"] = event["id"]
+                household["actors"][event["cart_id"]] = event["actor_id"]
+            for household in households.values():
+                for cart_id in household["actors"]:
                     staged[cart_id] = json.dumps(load_contributions(db, cart_id))
         self.redis.hset(self.stash, mapping=staged)
-        return events[-1]["id"], carts_by_household
+        return events[-1]["id"], households
 
     def flush(self) -> None:
         # Rebuild from committed events so Redis restarts cannot drop a pending update.
         cutoff, households = self.stage(after=0)
         if not households:
             return
-        cart_ids = [cart_id for carts in households.values() for cart_id in carts]
+        cart_ids = [cart_id for household in households.values() for cart_id in household["actors"]]
         snapshots = dict(zip(cart_ids, self.redis.hmget(self.stash, cart_ids), strict=True))
         if any(snapshot is None for snapshot in snapshots.values()):
             return
         with self.redis.pipeline(transaction=True) as batch:
-            for household_id, actors in households.items():
-                payload = {"revision": cutoff, "carts": {
+            for household_id, household in households.items():
+                actors = household["actors"]
+                payload = {"revision": household["revision"], "carts": {
                     cart_id: json.loads(snapshots[cart_id]) for cart_id in actors
                 }, "actors": actors}
                 batch.publish(self.channel(household_id), json.dumps(payload))
             batch.hdel(self.stash, *cart_ids)
             batch.execute()
         with transaction(self.db_path, write=True) as db:
-            db.execute("DELETE FROM cart_sync_events WHERE id <= ?", (cutoff,))
+            # Another household can commit a lower sequence value after this flush reads its batch.
+            for household_id, household in households.items():
+                db.execute(
+                    "DELETE FROM cart_sync_events WHERE household_id = ? AND id <= ?",
+                    (household_id, household["revision"]),
+                )
         self.staged_through = cutoff
 
     async def run(self) -> None:

@@ -6,6 +6,8 @@ from pathlib import Path
 from backend.shared.database import DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target
 
 SQL_DIR = Path(__file__).parent
+ADDRESS_TABLES = ("user_addresses", "household_addresses")
+ADDRESS_FIELDS = "id, label, recipient_name, address_line1, address_line2, city, postal_code, phone, latitude, longitude"
 
 
 def database_target() -> DatabaseTarget:
@@ -18,24 +20,37 @@ def initialize_database(path: DatabaseTarget) -> None:
     schema_name = "postgres_schema.sql" if is_postgres_target(path) else "schema.sql"
     schema = (SQL_DIR / schema_name).read_text(encoding="utf-8")
     seed = (SQL_DIR / "seed.sql").read_text(encoding="utf-8")
+    checkout_schema = (SQL_DIR / "checkout_schema.sql").read_text(encoding="utf-8")
     with closing(connect_database(path)) as db:
         if db.dialect == "sqlite":
-            db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\nCOMMIT;")
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(cart_sync_events)")}
-            if "actor_id" not in columns:
-                db.execute("ALTER TABLE cart_sync_events ADD COLUMN actor_id TEXT")
-            db.commit()
+            db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\n{checkout_schema}")
+            with db:
+                add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT"})
+                for table in ADDRESS_TABLES:
+                    add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
         else:
             db.execute("BEGIN")
             try:
                 db.execute_script(schema)
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS actor_id TEXT")
+                for table in ADDRESS_TABLES:
+                    db.execute(f"""ALTER TABLE {table}
+                        ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
+                        ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION""")
                 db.execute_script(seed)
+                db.execute_script(checkout_schema)
             except Exception:
                 db.rollback()
                 raise
             else:
                 db.commit()
+
+
+def add_sqlite_columns(db: DatabaseConnection, table: str, definitions: dict[str, str]) -> None:
+    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+    for column, data_type in definitions.items():
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {data_type}")
 
 
 @contextmanager
@@ -53,17 +68,40 @@ def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[Databa
 
 
 def active_member(
-    db: DatabaseConnection, household_id: str, user_id: str
+    db: DatabaseConnection, household_id: str, user_id: str, *, lock: bool = False
 ):
+    row_lock = "FOR SHARE OF members, profiles" if lock and db.dialect == "postgresql" else ""
     return db.execute(
-        """
+        f"""
         SELECT members.role, profiles.created_by AS owner_id
         FROM household_members AS members
         JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
         WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
+        {row_lock}
         """,
         (household_id, user_id),
     ).fetchone()
+
+
+def lock_household(db: DatabaseConnection, household_id: str) -> None:
+    # Every household writer takes this lock before reading roles or changing carts.
+    if db.dialect == "postgresql":
+        db.execute("SELECT id FROM households WHERE id = ? FOR NO KEY UPDATE", (household_id,)).fetchone()
+
+
+def personal_cart(db: DatabaseConnection, user_id: str, *, lock: bool = False):
+    row_lock = " FOR NO KEY UPDATE" if lock and db.dialect == "postgresql" else ""
+    return db.execute(
+        "SELECT id FROM personal_carts WHERE user_id = ?" + row_lock, (user_id,)
+    ).fetchone()
+
+
+def increment_personal_revision(db: DatabaseConnection, cart_id: str, updated_at: str) -> None:
+    db.execute("UPDATE personal_carts SET updated_at = ? WHERE id = ?", (updated_at, cart_id))
+    db.execute(
+        """INSERT INTO checkout_cart_revisions (kind, cart_id, revision) VALUES ('personal', ?, 1)
+           ON CONFLICT (kind, cart_id) DO UPDATE SET revision = checkout_cart_revisions.revision + 1""", (cart_id,),
+    )
 
 
 def household_member(db: DatabaseConnection, household_id: str, user_id: str):

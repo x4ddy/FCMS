@@ -3,6 +3,7 @@ import secrets
 import sqlite3
 import unittest
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -50,9 +51,10 @@ class StageTwoTests(unittest.TestCase):
         self.child = self.sign_in("demo-child", "child-demo-2026")
 
     def sign_in(self, identifier: str, password: str) -> dict[str, str]:
+        birth = f"{date.today().year - 10}-01-01" if identifier == "demo-child" else "2000-01-01"
         response = self.auth.post(
             "/api/v1/auth/google",
-            json={"credential": f"{identifier}|" + "x" * 100},
+            json={"credential": f"{identifier}|" + "x" * 100, "date_of_birth": birth},
         )
         self.assertEqual(response.status_code, 200)
         return {"Authorization": f"Bearer {response.json()['access_token']}"}

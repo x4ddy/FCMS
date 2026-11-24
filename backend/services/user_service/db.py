@@ -81,6 +81,8 @@ def initialize_database(path: DatabaseTarget) -> None:
             database.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS users_google_subject_idx ON users(google_subject)"
             )
+        if "date_of_birth" not in columns:
+            database.execute("ALTER TABLE users ADD COLUMN date_of_birth TEXT")
 
 
 @contextmanager
@@ -104,16 +106,19 @@ def upsert_user(
     now: str,
     email: str | None = None,
     google_subject: str | None = None,
-) -> None:
-    database.execute(
+    date_of_birth: str | None = None,
+):
+    return database.execute(
         """INSERT INTO users
-           (user_id, email, google_subject, display_name, is_adult, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+           (user_id, email, google_subject, display_name, is_adult, status, created_at, updated_at, date_of_birth)
+           VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
            ON CONFLICT(user_id) DO UPDATE SET
                display_name = excluded.display_name,
-               is_adult = excluded.is_adult,
+               is_adult = CASE WHEN users.date_of_birth IS NULL THEN excluded.is_adult ELSE users.is_adult END,
                updated_at = excluded.updated_at,
                email = COALESCE(excluded.email, users.email),
-               google_subject = COALESCE(excluded.google_subject, users.google_subject)""",
-        (user_id, email, google_subject, display_name, int(is_adult), now, now),
-    )
+               google_subject = COALESCE(excluded.google_subject, users.google_subject),
+               date_of_birth = COALESCE(users.date_of_birth, excluded.date_of_birth)
+           RETURNING is_adult, google_subject IS NOT NULL AND date_of_birth IS NULL AS age_setup_required""",
+        (user_id, email, google_subject, display_name, int(is_adult), now, now, date_of_birth),
+    ).fetchone()
