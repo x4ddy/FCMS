@@ -174,6 +174,34 @@ class LiveSyncTests(unittest.TestCase):
         self.sync.tick()
         self.assertEqual(self.fake.published, [])
 
+    def test_shared_address_control_moves_with_household_ownership(self) -> None:
+        def address(label: str) -> dict:
+            return {"label": label, "recipient_name": label, "address_line1": "1 Street", "city": "Dubai",
+                    "latitude": 25.2, "longitude": 55.27}
+
+        primary_home = self.client.post(f"{self.root}/addresses", headers=self.primary, json=address("Pat home")).json()
+        member_home = self.client.post(f"{self.root}/addresses", headers=self.member, json=address("Morgan home")).json()
+        pin = {"latitude": 25.21, "longitude": 55.27}
+
+        def path(entry: dict) -> str:
+            return f"{self.root}/addresses/{entry['id']}"
+
+        # Before: only the primary may change other members' shared addresses.
+        self.assertEqual(self.client.patch(path(member_home), headers=self.primary, json=pin).status_code, 200)
+        self.assertEqual(self.client.patch(path(primary_home), headers=self.member, json=pin).status_code, 403)
+
+        self.assertEqual(self.client.put(f"{self.root}/members/{self.member_id}/primary", headers=self.primary).status_code, 200)
+
+        # After: the new primary sees and controls every shared address...
+        labels = [entry["label"] for entry in self.client.get(f"{self.root}/addresses", headers=self.member).json()]
+        self.assertEqual(sorted(labels), ["Morgan home", "Pat home"])
+        self.assertEqual(self.client.patch(path(primary_home), headers=self.member, json=pin).status_code, 200)
+        # ...and the previous primary keeps only what any member has: their own addresses.
+        self.assertEqual(self.client.patch(path(member_home), headers=self.primary, json=pin).status_code, 403)
+        self.assertEqual(self.client.delete(path(member_home), headers=self.primary).status_code, 403)
+        self.assertEqual(self.client.patch(path(primary_home), headers=self.primary, json=pin).status_code, 200)
+        self.assertEqual(self.client.delete(path(primary_home), headers=self.member).status_code, 204)
+
     def test_a_batch_names_everyone_who_changed_the_cart(self) -> None:
         item = f"{self.root}/carts/{self.cart['id']}/items/milk"
         self.client.patch(item, headers=self.member, json={"delta": 2})
