@@ -9,10 +9,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Path as PathParameter, Request, Response, WebSocket, WebSocketDisconnect
+import httpx
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as PathParameter, Query, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
 from redis.exceptions import RedisError
 from starlette.requests import HTTPConnection
 
@@ -20,17 +23,29 @@ from backend.shared.api import API_PREFIX
 from backend.shared.cache import cache_redis_url, live_redis_url
 from backend.shared.database import DatabaseConnection
 from backend.shared.demo_members import MEMBERS_BY_ID
+from backend.shared.maps import (
+    Coordinates, CoverageResult, Latitude, Longitude, MAPS_UNAVAILABLE, address_validation_error,
+    coverage_result, maps_service_url,
+)
 from backend.shared.tokens import Identity, load_jwt_secret, verify_token
+from backend.services.refresh_service.service import session_profile
+from backend.services.user_service.db import database_path as user_database_path
 
-from .live_sync import AccessEnded, LiveSync, build_snapshots, latest_revision, notify_changed, viewer_role
+from . import checkout
+from .live_sync import (
+    AccessEnded, LiveSync, build_snapshots, household_revision, latest_revision, notify_changed, viewer_role,
+)
 from .catalogue import Product, load_catalogue
 from .db import (
-    active_member, contribution_quantity, database_target, delete_cart, initialize_database, load_carts,
-    household_member, load_contributions, set_contribution, transaction,
+    ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart, increment_personal_revision,
+    initialize_database, load_carts,
+    household_member, load_contributions, lock_household, personal_cart, set_contribution, transaction,
 )
 
 bearer = HTTPBearer(auto_error=False)
 HOUSEHOLD = f"{API_PREFIX}/households/{{household_id}}"
+USER_ADDRESS = f"{API_PREFIX}/addresses/{{address_id}}"
+HOUSEHOLD_ADDRESS = f"{HOUSEHOLD}/addresses/{{address_id}}"
 SKU = Annotated[str, PathParameter(min_length=1, max_length=100, pattern=r"^\S+$")]
 MAX_QUANTITY = 2**63 - 1
 
@@ -123,6 +138,14 @@ class AddressInput(BaseModel):
     city: Name
     postal_code: Annotated[str | None, StringConstraints(strip_whitespace=True, max_length=24)] = None
     phone: Annotated[str | None, StringConstraints(strip_whitespace=True, max_length=24)] = None
+    latitude: Latitude | None = None
+    longitude: Longitude | None = None
+
+    @model_validator(mode="after")
+    def require_coordinate_pair(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Provide both latitude and longitude, or leave both empty")
+        return self
 
 
 class AddressResponse(AddressInput):
@@ -149,6 +172,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.db_path = database_target()
     initialize_database(app.state.db_path)
     app.state.products = load_catalogue()
+    app.state.user_db_path = user_database_path()
+    app.state.demo_checkout = os.environ.get("FAMILYCART_DEMO_CHECKOUT", "0") == "1"
+    with transaction(app.state.db_path, write=True) as db:
+        checkout.seed_inventory(db, app.state.products)
+    app.state.maps_url = maps_service_url()
+    app.state.maps_http = httpx.Client(timeout=httpx.Timeout(4, connect=1), trust_env=False)
     sync = LiveSync(app.state.db_path, live_redis_url(), cache_redis_url())
     app.state.live_sync = sync
     worker = asyncio.create_task(sync.run())
@@ -159,9 +188,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with suppress(asyncio.CancelledError):
             await worker
         await sync.close()
+        app.state.maps_http.close()
 
 
 app = FastAPI(title="FamilyCart", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request: Request, error: RequestValidationError) -> Response:
+    route = request.scope["route"].path
+    if route.startswith((f"{API_PREFIX}/addresses", f"{HOUSEHOLD}/addresses", f"{API_PREFIX}/checkout/")):
+        return address_validation_error(error)
+    return await request_validation_exception_handler(request, error)
 
 
 def require_identity(
@@ -186,12 +224,15 @@ Caller = Annotated[Identity, Depends(require_identity)]
 
 @contextmanager
 def household_access(
-    request: HTTPConnection, household_id: str, caller: Identity, *, write: bool = False
+    request: HTTPConnection, household_id: str, caller: Identity, *, write: bool = False,
+    conceal_revoked: bool = False, lock_membership: bool = False,
 ) -> Iterator[tuple[DatabaseConnection, bool]]:
     with transaction(request.app.state.db_path, write=write) as db:
-        member = active_member(db, household_id, caller.user_id)
+        if write:
+            lock_household(db, household_id)
+        member = active_member(db, household_id, caller.user_id, lock=lock_membership)
         if member is None:
-            membership = household_member(db, household_id, caller.user_id)
+            membership = None if conceal_revoked else household_member(db, household_id, caller.user_id)
             if membership is not None and not bool(membership["active"]):
                 primary_name = household_primary_name(db, household_id)
                 raise HTTPException(
@@ -199,8 +240,7 @@ def household_access(
                     detail=f"Your household access was revoked. Contact {primary_name}, the primary account holder.",
                 )
             raise HTTPException(status_code=404, detail="Household not found")
-        # Ownership is immutable: only the account that created the household
-        # is the primary, regardless of mutable membership role data.
+        # The household profile identifies the current primary, including after a transfer.
         yield db, member["owner_id"] == caller.user_id
 
 
@@ -217,17 +257,16 @@ def record_cart_change(
     db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None = None
 ) -> int:
     notify_changed(db, household_id)
-    if db.dialect == "postgresql":
-        row = db.execute(
-            "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?) RETURNING id",
-            (household_id, cart_id, actor_id),
-        ).fetchone()
-        return row["id"]
-    cursor = db.execute(
-        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?)",
+    event = db.execute(
+        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?) RETURNING id",
         (household_id, cart_id, actor_id),
+    ).fetchone()
+    db.execute(
+        """INSERT INTO checkout_cart_revisions (kind, cart_id, revision) VALUES ('household', ?, ?)
+           ON CONFLICT (kind, cart_id) DO UPDATE SET revision = excluded.revision""",
+        (cart_id, event["id"]),
     )
-    return cursor.lastrowid
+    return event["id"]
 
 
 def can_create_adults_only_cart(caller: Identity, is_primary: bool) -> bool:
@@ -359,19 +398,17 @@ def adjust_personal_cart_item(
     if body.delta == 0:
         raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
     visible_product(request, sku, caller)
-    now = datetime.now(timezone.utc).isoformat()
     with transaction(request.app.state.db_path, write=True) as db:
-        cart = db.execute(
-            "SELECT id FROM personal_carts WHERE user_id = ?", (caller.user_id,)
-        ).fetchone()
+        cart = personal_cart(db, caller.user_id, lock=True)
+        now = datetime.now(timezone.utc).isoformat()
         if cart is None:
-            cart_id = str(uuid4())
             db.execute(
-                "INSERT INTO personal_carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (cart_id, caller.user_id, now, now),
+                """INSERT INTO personal_carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (user_id) DO NOTHING""",
+                (str(uuid4()), caller.user_id, now, now),
             )
-        else:
-            cart_id = cart["id"]
+            cart = personal_cart(db, caller.user_id, lock=True)
+        cart_id = cart["id"]
         current = db.execute(
             "SELECT quantity FROM personal_cart_items WHERE cart_id = ? AND sku = ?",
             (cart_id, sku),
@@ -391,7 +428,7 @@ def adjust_personal_cart_item(
                      quantity = excluded.quantity, updated_at = excluded.updated_at""",
                 (cart_id, sku, quantity, now),
             )
-        db.execute("UPDATE personal_carts SET updated_at = ? WHERE id = ?", (now, cart_id))
+        increment_personal_revision(db, cart_id, now)
         return PersonalCartItem(sku=sku, quantity=quantity)
 
 
@@ -491,6 +528,14 @@ def accept_invitation(
         ):
             raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
         household_id = invitation["household_id"]
+        lock_household(db, household_id)
+        claimed = db.execute(
+            """UPDATE household_invitations SET accepted_by = ?, accepted_at = ?
+               WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?""",
+            (caller.user_id, now.isoformat(), invitation["id"], now.isoformat()),
+        )
+        if not claimed.rowcount:
+            raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
         db.execute(
             """INSERT INTO household_members (household_id, user_id, role, active)
                VALUES (?, ?, 'member', 1)
@@ -510,10 +555,6 @@ def accept_invitation(
                WHERE household_id = ? AND adults_only = 0
                ON CONFLICT (cart_id, member_id) DO NOTHING""",
             (caller.user_id, household_id),
-        )
-        db.execute(
-            "UPDATE household_invitations SET accepted_by = ?, accepted_at = ? WHERE id = ?",
-            (caller.user_id, now.isoformat(), invitation["id"]),
         )
         for cart in db.execute("SELECT id FROM carts WHERE household_id = ?", (household_id,)):
             record_cart_change(db, household_id, cart["id"], caller.user_id)
@@ -711,9 +752,7 @@ def revoke_member(
 def list_user_addresses(request: Request, caller: Caller) -> list[UserAddressResponse]:
     with transaction(request.app.state.db_path) as db:
         rows = db.execute(
-            """SELECT id, label, recipient_name, address_line1, address_line2,
-                      city, postal_code, phone
-               FROM user_addresses WHERE user_id = ? ORDER BY created_at, id""",
+            f"SELECT {ADDRESS_FIELDS} FROM user_addresses WHERE user_id = ? ORDER BY created_at, id",
             (caller.user_id,),
         )
         return [UserAddressResponse(**dict(row)) for row in rows]
@@ -727,18 +766,177 @@ def create_user_address(body: AddressInput, request: Request, caller: Caller) ->
         db.execute(
             """INSERT INTO user_addresses
                (id, user_id, label, recipient_name, address_line1, address_line2,
-                city, postal_code, phone, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                city, postal_code, phone, latitude, longitude, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 address_id, caller.user_id, body.label, body.recipient_name,
                 body.address_line1, body.address_line2 or None, body.city,
-                body.postal_code or None, body.phone or None, now, now,
+                body.postal_code or None, body.phone or None, body.latitude, body.longitude, now, now,
             ),
         )
     return UserAddressResponse(id=address_id, **body.model_dump())
 
 
-@app.delete(f"{API_PREFIX}/addresses/{{address_id}}", status_code=204)
+@app.patch(USER_ADDRESS)
+def pin_user_address(
+    address_id: str, body: Coordinates, request: Request, caller: Caller,
+) -> UserAddressResponse:
+    with transaction(request.app.state.db_path, write=True) as db:
+        address = db.execute(
+            f"""UPDATE user_addresses SET latitude = ?, longitude = ?, updated_at = ?
+                WHERE id = ? AND user_id = ? RETURNING {ADDRESS_FIELDS}""",
+            (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(), address_id, caller.user_id),
+        ).fetchone()
+        if address is None:
+            raise HTTPException(status_code=404, detail="Address not found")
+        return UserAddressResponse(**dict(address))
+
+
+def resolve_address_pin(request: Request, latitude: float | None, longitude: float | None) -> CoverageResult:
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=409, detail="ADDRESS_NEEDS_PIN")
+    try:
+        maps_response = request.app.state.maps_http.post(
+            f"{request.app.state.maps_url}{API_PREFIX}/maps/resolve",
+            json={"latitude": latitude, "longitude": longitude},
+        )
+        maps_response.raise_for_status()
+        return coverage_result.validate_json(maps_response.content)
+    except (httpx.HTTPError, ValidationError):
+        raise HTTPException(status_code=503, detail=MAPS_UNAVAILABLE) from None
+
+
+def checkout_profile(request: Request, caller: Identity):
+    profile = session_profile(request.app.state.user_db_path, caller.session_id, caller.user_id) if caller.session_id else None
+    if profile is None:
+        raise HTTPException(status_code=401, detail="Session has ended")
+    return profile
+
+
+def require_checkout_adult(request: Request, caller: Identity) -> None:
+    profile = checkout_profile(request, caller)
+    if not caller.is_adult or not profile["is_adult"]:
+        raise checkout.error(403, "AGE_ELIGIBILITY_REQUIRED", "Checkout requires an adult account.")
+
+
+@app.post(f"{API_PREFIX}/checkout/quotes", status_code=201)
+def review_checkout(body: checkout.QuoteInput, request: Request, response: Response, caller: Caller) -> dict:
+    require_checkout_adult(request, caller)
+    path = request.app.state.db_path
+    products = request.app.state.products
+    with transaction(path, write=True) as db:
+        checkout.lock_cart(db, body.cart, caller)
+        state = checkout.snapshot(db, body, caller, products, lock=True)
+    groups = checkout.resolve_groups(state["groups"], lambda lat, lon: resolve_address_pin(request, lat, lon))
+    with transaction(path, write=True) as db:
+        quote = checkout.save_quote(db, caller.user_id, state, groups, request.app.state.demo_checkout)
+    response.headers["Cache-Control"] = "no-store"
+    return quote
+
+
+@app.post(f"{API_PREFIX}/checkout/orders", status_code=201)
+def place_order(
+    body: checkout.OrderInput, request: Request, response: Response, caller: Caller,
+    key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$")],
+) -> dict:
+    checkout_profile(request, caller)
+    path = request.app.state.db_path
+    products = request.app.state.products
+    attempt = checkout.fingerprint(body)
+    response.headers["Cache-Control"] = "no-store"
+
+    def replay(db):
+        existing = checkout.successful_attempt(db, caller.user_id, key, attempt)
+        if existing:
+            response.status_code = 200
+        return existing
+
+    try:
+        with transaction(path) as db:
+            existing = replay(db)
+            if existing:
+                return existing
+            require_checkout_adult(request, caller)
+            if "mock_outcome" in body.model_fields_set and not request.app.state.demo_checkout:
+                raise checkout.error(422, "MOCK_OUTCOME_DISABLED", "Mock payment overrides are disabled.")
+            reviewed, expires_at = checkout.load_quote(db, body.quote_id, caller.user_id)
+            selection = checkout.QuoteInput.model_validate(reviewed["state"]["selection"])
+            state = checkout.revalidate(db, reviewed["state"], selection, caller, products, lock=False)
+        groups = checkout.resolve_groups(state["groups"], lambda lat, lon: resolve_address_pin(request, lat, lon))
+        if groups != reviewed["groups"]:
+            raise checkout.stale()
+    except HTTPException:
+        # Another request may have placed this order while this one checked coverage.
+        with transaction(path) as db:
+            existing = replay(db)
+            if existing:
+                return existing
+            checkout.require_unused_quote(db, body.quote_id, caller.user_id)
+        raise
+
+    with transaction(path, write=True) as db:
+        checkout.lock_cart(db, selection.cart, caller)
+        existing = replay(db)
+        if existing:
+            return existing
+        checkout.load_quote(db, body.quote_id, caller.user_id)
+        checkout.revalidate(db, reviewed["state"], selection, caller, products, lock=True)
+        require_checkout_adult(request, caller)
+        order_id = checkout.claim_order(db, caller.user_id, key, attempt, body, selection, groups)
+        if order_id is None:
+            existing = replay(db)
+            if existing:
+                return existing
+            checkout.require_unused_quote(db, body.quote_id, caller.user_id)
+            raise RuntimeError("Could not allocate a unique order ID")
+
+        requested = checkout.check_stock(db, groups, lock=True)
+        checkout.require_unexpired(expires_at)
+        if body.mock_outcome == "decline":
+            raise checkout.error(402, "MOCK_PAYMENT_DECLINED", "The mock payment declined. Try again when ready.")
+        checkout.fulfill_order(db, order_id, groups, requested)
+        if selection.cart.kind == "personal":
+            db.execute("DELETE FROM personal_cart_items WHERE cart_id = ?", (state["cart_id"],))
+            increment_personal_revision(db, state["cart_id"], datetime.now(timezone.utc).isoformat())
+        else:
+            db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (selection.cart.cart_id,))
+            record_cart_change(db, selection.cart.household_id, selection.cart.cart_id, caller.user_id)
+        return checkout.order_detail(db, order_id, caller.user_id)
+
+
+@app.get(f"{API_PREFIX}/orders")
+def list_orders(
+    request: Request, response: Response, caller: Caller,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    before: Annotated[str | None, Query(min_length=1, max_length=128)] = None,
+) -> dict:
+    checkout_profile(request, caller)
+    response.headers["Cache-Control"] = "no-store"
+    with transaction(request.app.state.db_path) as db:
+        return checkout.order_history(db, caller.user_id, limit, before)
+
+
+@app.get(f"{API_PREFIX}/orders/{{order_id}}")
+def get_order(order_id: str, request: Request, response: Response, caller: Caller) -> dict:
+    checkout_profile(request, caller)
+    response.headers["Cache-Control"] = "no-store"
+    with transaction(request.app.state.db_path) as db:
+        return checkout.order_detail(db, order_id, caller.user_id)
+
+
+@app.post(f"{USER_ADDRESS}/resolve-store")
+def resolve_user_address(address_id: str, request: Request, caller: Caller) -> CoverageResult:
+    with transaction(request.app.state.db_path) as db:
+        address = db.execute(
+            "SELECT latitude, longitude FROM user_addresses WHERE id = ? AND user_id = ?",
+            (address_id, caller.user_id),
+        ).fetchone()
+        if address is None:
+            raise HTTPException(status_code=404, detail="Address not found")
+    return resolve_address_pin(request, address["latitude"], address["longitude"])
+
+
+@app.delete(USER_ADDRESS, status_code=204)
 def delete_user_address(address_id: str, request: Request, caller: Caller) -> Response:
     with transaction(request.app.state.db_path, write=True) as db:
         address = db.execute(
@@ -757,9 +955,8 @@ def list_addresses(
 ) -> list[AddressResponse]:
     with household_access(request, household_id, caller) as (db, _):
         rows = db.execute(
-            """SELECT id, label, recipient_name, address_line1, address_line2,
-                      city, postal_code, phone, created_by
-               FROM household_addresses WHERE household_id = ? ORDER BY created_at, id""",
+            f"""SELECT {ADDRESS_FIELDS}, created_by
+                FROM household_addresses WHERE household_id = ? ORDER BY created_at, id""",
             (household_id,),
         )
         return [AddressResponse(**dict(row)) for row in rows]
@@ -775,18 +972,58 @@ def create_address(
         db.execute(
             """INSERT INTO household_addresses
                (id, household_id, label, recipient_name, address_line1, address_line2,
-                city, postal_code, phone, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                city, postal_code, phone, latitude, longitude, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 address_id, household_id, body.label, body.recipient_name,
                 body.address_line1, body.address_line2 or None, body.city,
-                body.postal_code or None, body.phone or None, caller.user_id, now, now,
+                body.postal_code or None, body.phone or None, body.latitude, body.longitude,
+                caller.user_id, now, now,
             ),
         )
     return AddressResponse(id=address_id, created_by=caller.user_id, **body.model_dump())
 
 
-@app.delete(f"{HOUSEHOLD}/addresses/{{address_id}}", status_code=204)
+@app.patch(HOUSEHOLD_ADDRESS)
+def pin_household_address(
+    household_id: str, address_id: str, body: Coordinates, request: Request, caller: Caller,
+) -> AddressResponse:
+    with household_access(
+        request, household_id, caller, write=True, conceal_revoked=True, lock_membership=True,
+    ) as (db, is_primary):
+        address = db.execute(
+            f"""UPDATE household_addresses SET latitude = ?, longitude = ?, updated_at = ?
+                WHERE household_id = ? AND id = ? AND (? OR created_by = ?)
+                RETURNING {ADDRESS_FIELDS}, created_by""",
+            (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(),
+             household_id, address_id, is_primary, caller.user_id),
+        ).fetchone()
+        if address is None:
+            exists = db.execute(
+                "SELECT 1 FROM household_addresses WHERE household_id = ? AND id = ?",
+                (household_id, address_id),
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(status_code=404, detail="Address not found")
+            raise HTTPException(status_code=403, detail="You can only move the pin for an address you added")
+        return AddressResponse(**dict(address))
+
+
+@app.post(f"{HOUSEHOLD_ADDRESS}/resolve-store")
+def resolve_household_address(
+    household_id: str, address_id: str, request: Request, caller: Caller,
+) -> CoverageResult:
+    with household_access(request, household_id, caller, conceal_revoked=True) as (db, _):
+        address = db.execute(
+            "SELECT latitude, longitude FROM household_addresses WHERE household_id = ? AND id = ?",
+            (household_id, address_id),
+        ).fetchone()
+        if address is None:
+            raise HTTPException(status_code=404, detail="Address not found")
+    return resolve_address_pin(request, address["latitude"], address["longitude"])
+
+
+@app.delete(HOUSEHOLD_ADDRESS, status_code=204)
 def delete_address(
     household_id: str, address_id: str, request: Request, caller: Caller
 ) -> Response:
@@ -1108,7 +1345,8 @@ def initial_snapshot(db_path, household_id: str, cart_id: str | None) -> dict:
         if household_id not in snapshots:
             raise AccessEnded("Household not found")
         snapshot = snapshots[household_id]
-        snapshot["revision"] = latest_revision(db)
+        # Same numbering as checkout uses to check the cart has not changed since a quote.
+        snapshot["revision"] = household_revision(db, household_id)
         return snapshot
 
 

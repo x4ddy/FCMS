@@ -33,7 +33,9 @@ class SessionLifecycleTests(unittest.TestCase):
         self.refresh = self.enterContext(TestClient(refresh_app))
 
     def login(self) -> tuple[dict, str]:
-        response = self.auth.post("/api/v1/auth/google", json={"credential": "x" * 100})
+        response = self.auth.post(
+            "/api/v1/auth/google", json={"credential": "x" * 100, "date_of_birth": "2000-01-01"},
+        )
         self.assertEqual(response.status_code, 200)
         return response.json(), response.cookies[REFRESH_COOKIE]
 
@@ -48,6 +50,8 @@ class SessionLifecycleTests(unittest.TestCase):
         second_refresh = rotated.cookies[REFRESH_COOKIE]
         self.assertNotEqual(first_refresh, second_refresh)
         self.assertEqual(rotated.json()["expires_in"], 600)
+        self.assertTrue(rotated.json()["user"]["is_adult"])
+        self.assertFalse(rotated.json()["user"]["age_setup_required"])
 
         replay = self.refresh.post("/api/v1/sessions/refresh", cookies={REFRESH_COOKIE: first_refresh})
         self.assertEqual(replay.status_code, 401)

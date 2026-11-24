@@ -11,17 +11,20 @@ import httpx
 import websockets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from jwt import InvalidTokenError
+from pydantic import ValidationError
 from starlette.responses import Response
 
 from backend.services.refresh_service.service import session_is_active
 from backend.shared.cache import RedisError, async_client, cache_breaker, cache_redis_url, session_cache_seconds, session_key
 from backend.services.user_service.db import database_path, initialize_database
 from backend.shared.api import API_PREFIX
+from backend.shared.maps import Coordinates, MAPS_UNAVAILABLE, maps_service_url
 from backend.shared.tokens import load_jwt_secret, verify_token
 
 
 MAX_BODY_BYTES = 1024 * 1024
-PUBLIC_PREFIXES = ("auth/", "sessions/")
+PUBLIC_AUTH = {"auth/google", "auth/google/config"}
+MAP_ROUTES = {"maps/stores": "GET", "maps/resolve": "POST"}
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "content-length",
@@ -48,6 +51,8 @@ def _target_for(path: str, app: FastAPI) -> str:
         return app.state.auth_url
     if path.startswith("sessions/"):
         return app.state.refresh_url
+    if path in MAP_ROUTES:
+        return app.state.maps_url
     if (
         path == "households"
         or path.startswith("households/")
@@ -58,6 +63,9 @@ def _target_for(path: str, app: FastAPI) -> str:
         or path.startswith("addresses/")
         or path == "products"
         or path.startswith("products/")
+        or path in {"checkout/quotes", "checkout/orders"}
+        or path == "orders"
+        or path.startswith("orders/")
     ):
         return app.state.familycart_url
     raise HTTPException(status_code=404, detail="Route not found")
@@ -134,7 +142,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.auth_url = os.environ.get("FAMILYCART_AUTH_URL", "http://127.0.0.1:8001")
     app.state.familycart_url = os.environ.get("FAMILYCART_API_URL", "http://127.0.0.1:8002")
     app.state.refresh_url = os.environ.get("FAMILYCART_REFRESH_URL", "http://127.0.0.1:8003")
+    app.state.maps_url = maps_service_url()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
+    maps_http = app.state.maps_http = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=1), trust_env=False)
     app.state.limiter = SlidingWindowLimiter()
     app.state.cache = async_client(cache_redis_url())
     try:
@@ -142,6 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         await app.state.http.aclose()
         await app.state.cache.aclose()
+        await maps_http.aclose()
 
 
 app = FastAPI(title="FamilyCart API Gateway", lifespan=lifespan)
@@ -172,7 +183,7 @@ def health() -> dict[str, str]:
 async def proxy(path: str, request: Request) -> Response:
     client_ip = request.client.host if request.client else "unknown"
     sensitive = path in {
-        "auth/google", "sessions/refresh",
+        "auth/google", "auth/age", "sessions/refresh",
         "household-invitations/accept",
     }
     limit = 10 if sensitive else 120
@@ -187,7 +198,7 @@ async def proxy(path: str, request: Request) -> Response:
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         _validate_origin(request)
 
-    if not path.startswith(PUBLIC_PREFIXES):
+    if path not in PUBLIC_AUTH and not path.startswith("sessions/"):
         await _validate_access(request.app, _bearer_token(request.headers.get("authorization")))
 
     content_length = request.headers.get("content-length")
@@ -202,6 +213,8 @@ async def proxy(path: str, request: Request) -> Response:
         raise HTTPException(status_code=413, detail="Request body is too large")
 
     target = _target_for(path, request.app)
+    if path in MAP_ROUTES:
+        return await proxy_maps(path, request, target, body)
     headers = {
         name: value for name, value in request.headers.items()
         if name.lower() not in HOP_BY_HOP and name.lower() != "host"
@@ -222,6 +235,24 @@ async def proxy(path: str, request: Request) -> Response:
         }
     }
     return Response(upstream.content, upstream.status_code, headers=response_headers)
+
+
+async def proxy_maps(path: str, request: Request, target: str, body: bytes) -> Response:
+    method = MAP_ROUTES[path]
+    if request.method != method:
+        raise HTTPException(status_code=405, detail="Method not allowed", headers={"Allow": method})
+    payload = None
+    if method == "POST":
+        try:
+            payload = Coordinates.model_validate_json(body).model_dump()
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="A valid latitude and longitude are required") from None
+    try:
+        upstream = await request.app.state.maps_http.request(method, f"{target}{API_PREFIX}/{path}", json=payload)
+        upstream.raise_for_status()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail=MAPS_UNAVAILABLE) from None
+    return Response(upstream.content, media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 @app.websocket(f"{API_PREFIX}/households/{{path:path}}")

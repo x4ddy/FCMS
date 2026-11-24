@@ -24,6 +24,10 @@ class RefreshTokenReuse(InvalidRefreshToken):
     pass
 
 
+class DateOfBirthRequired(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class SessionTokens:
     access_token: str
@@ -31,6 +35,8 @@ class SessionTokens:
     expires_in: int
     user_id: str
     display_name: str
+    is_adult: bool
+    age_setup_required: bool
 
 
 def _hash_token(session_id: str, secret_part: str, signing_secret: str) -> str:
@@ -66,6 +72,8 @@ def create_session(
     *,
     email: str | None = None,
     google_subject: str | None = None,
+    date_of_birth: str | None = None,
+    require_date_of_birth: bool = False,
     user_agent: str | None = None,
     ip_address: str | None = None,
 ) -> SessionTokens:
@@ -73,9 +81,13 @@ def create_session(
     session_id = str(uuid4())
     refresh_token, token_hash = _new_refresh_token(session_id, signing_secret)
     with transaction(path) as database:
-        upsert_user(
+        if require_date_of_birth and date_of_birth is None and database.execute(
+            "SELECT 1 FROM users WHERE user_id = ? AND date_of_birth IS NOT NULL", (identity.user_id,),
+        ).fetchone() is None:
+            raise DateOfBirthRequired
+        profile = upsert_user(
             database, identity.user_id, display_name, identity.is_adult, now.isoformat(),
-            email, google_subject,
+            email, google_subject, date_of_birth,
         )
         database.execute(
             """INSERT INTO refresh_sessions
@@ -94,13 +106,15 @@ def create_session(
                 ip_address,
             ),
         )
-    access_identity = Identity(identity.user_id, identity.is_adult, session_id)
+    access_identity = Identity(identity.user_id, bool(profile["is_adult"]), session_id)
     return SessionTokens(
         issue_token(access_identity, signing_secret),
         refresh_token,
         int(ACCESS_TOKEN_LIFETIME.total_seconds()),
         identity.user_id,
         display_name,
+        access_identity.is_adult,
+        bool(profile["age_setup_required"]),
     )
 
 
@@ -109,7 +123,8 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
     now = datetime.now(timezone.utc)
     with transaction(path) as database:
         session_query = (
-            """SELECT s.*, u.display_name, u.is_adult, u.status
+            """SELECT s.*, u.display_name, u.is_adult, u.status,
+                      u.google_subject IS NOT NULL AND u.date_of_birth IS NULL AS age_setup_required
                FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
                WHERE s.session_id = ?"""
             + (" FOR UPDATE" if database.dialect == "postgresql" else "")
@@ -163,6 +178,8 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
         int(ACCESS_TOKEN_LIFETIME.total_seconds()),
         session["user_id"],
         session["display_name"],
+        identity.is_adult,
+        bool(session["age_setup_required"]),
     )
 
 
@@ -179,11 +196,15 @@ def revoke_session(path: DatabaseTarget, session_id: str) -> None:
 
 
 def session_is_active(path: DatabaseTarget, session_id: str, user_id: str) -> bool:
+    return session_profile(path, session_id, user_id) is not None
+
+
+def session_profile(path: DatabaseTarget, session_id: str, user_id: str):
     now = datetime.now(timezone.utc).isoformat()
     with closing(connect(path)) as database:
         return database.execute(
-            """SELECT 1 FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
+            """SELECT u.is_adult, u.date_of_birth FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
                WHERE s.session_id = ? AND s.user_id = ? AND s.revoked_at IS NULL
                  AND s.absolute_expires_at > ? AND u.status = 'ACTIVE'""",
             (session_id, user_id, now),
-        ).fetchone() is not None
+        ).fetchone()

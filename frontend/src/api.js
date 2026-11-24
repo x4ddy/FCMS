@@ -4,15 +4,17 @@ let accessTokenListener = () => {}
 let refreshPromise = null
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, detail = null) {
     super(message)
     this.status = status
+    this.code = detail?.code
+    this.detail = detail
   }
 }
 
-function publishAccessToken(token) {
+function publishAccessToken(token, user) {
   activeAccessToken = token
-  accessTokenListener(token)
+  accessTokenListener(token, user)
 }
 
 export function onAccessTokenChanged(listener) {
@@ -33,47 +35,50 @@ async function requestRefreshedSession() {
     publishAccessToken(null)
     throw new ApiError(response.status, typeof data?.detail === 'string' ? data.detail : 'Your session ended.')
   }
-  publishAccessToken(data.access_token)
+  publishAccessToken(data.access_token, data.user)
   return data
 }
 
 export function restoreSession() {
-  return requestRefreshedSession()
-}
-
-export function refreshAccessToken() {
   if (refreshPromise) return refreshPromise
-  refreshPromise = (async () => {
-    const session = await requestRefreshedSession()
-    return session.access_token
-  })().finally(() => { refreshPromise = null })
+  refreshPromise = requestRefreshedSession().finally(() => { refreshPromise = null })
   return refreshPromise
 }
 
-async function request(path, { token, method = 'GET', body, retry = true } = {}) {
+export async function refreshAccessToken() {
+  return (await restoreSession()).access_token
+}
+
+async function request(path, { token, method = 'GET', body, retry = true, signal, idempotencyKey } = {}) {
   const headers = {}
   const bearer = token ? (activeAccessToken || token) : null
   if (bearer) headers.Authorization = `Bearer ${bearer}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
   const response = await fetch(path, {
-    method, headers, body: JSON.stringify(body), cache: 'no-store', credentials: 'include',
+    method, headers, body: JSON.stringify(body), cache: 'no-store', credentials: 'include', signal,
   })
   if (response.status === 401 && token && retry) {
+    signal?.throwIfAborted()
     const refreshedToken = await refreshAccessToken()
-    return request(path, { token: refreshedToken, method, body, retry: false })
+    return request(path, { token: refreshedToken, method, body, retry: false, signal, idempotencyKey })
   }
   if (response.status === 204) return
 
   const data = await response.json().catch(() => null)
-  if (!response.ok || data === null) throw new ApiError(response.status, errorMessage(data, response.status))
+  if (!response.ok || data === null) {
+    const detail = data?.detail
+    throw new ApiError(response.status, errorMessage(detail, response.status), detail)
+  }
   return data
 }
 
-/** A readable message from an error response, including FastAPI's 422 validation lists. */
-function errorMessage(data, status) {
-  if (typeof data?.detail === 'string') return data.detail
-  if (Array.isArray(data?.detail) && data.detail.length > 0) {
-    const [first] = data.detail
+/** A readable message from an error response: plain text, {message}, or FastAPI's 422 validation list. */
+function errorMessage(detail, status) {
+  if (typeof detail === 'string') return detail
+  if (detail?.message) return detail.message
+  if (Array.isArray(detail) && detail.length > 0) {
+    const [first] = detail
     const field = Array.isArray(first.loc) ? first.loc.filter((part) => part !== 'body').join('.') : ''
     return field ? `${field}: ${first.msg}` : String(first.msg ?? `Request failed (${status}).`)
   }
@@ -81,9 +86,9 @@ function errorMessage(data, status) {
   return `Request failed (${status}).`
 }
 
-export async function signInWithGoogle(credential) {
+export async function signInWithGoogle(credential, dateOfBirth) {
   const session = await request(`${api}/auth/google`, {
-    method: 'POST', body: { credential },
+    method: 'POST', body: { credential, date_of_birth: dateOfBirth },
   })
   publishAccessToken(session.access_token)
   return session
@@ -101,9 +106,23 @@ export async function logoutSession(token) {
   }
 }
 
+function addressApi(token, path) {
+  const addressPath = (id) => `${path}/${encodeURIComponent(id)}`
+  return {
+    addresses: () => request(path, { token }),
+    createAddress: (address) => request(path, { token, method: 'POST', body: address }),
+    deleteAddress: (id) => request(addressPath(id), { token, method: 'DELETE' }),
+    updateAddressPin: (id, pin) => request(addressPath(id), { token, method: 'PATCH', body: pin }),
+    resolveAddress: (id, signal) => request(`${addressPath(id)}/resolve-store`, { token, method: 'POST', signal }),
+    mapStores: (signal) => request(`${api}/maps/stores`, { token, signal }),
+    previewPin: (pin, signal) => request(`${api}/maps/resolve`, { token, method: 'POST', body: pin, signal }),
+  }
+}
+
 export function accountApi(token) {
   if (token) activeAccessToken = token
   return {
+    ...addressApi(token, `${api}/addresses`),
     households: () => request(`${api}/households`, { token }),
     createHousehold: (name, displayName) => request(`${api}/households`, {
       token, method: 'POST', body: { name, display_name: displayName },
@@ -112,15 +131,21 @@ export function accountApi(token) {
       token, method: 'POST', body: { invitation_code: invitationCode, display_name: displayName },
     }),
     personalCart: () => request(`${api}/personal-cart`, { token }),
-    addresses: () => request(`${api}/addresses`, { token }),
-    createAddress: (address) => request(`${api}/addresses`, { token, method: 'POST', body: address }),
-    deleteAddress: (id) => request(`${api}/addresses/${encodeURIComponent(id)}`, {
-      token, method: 'DELETE',
-    }),
     adjustPersonalItem: (sku, delta) => request(`${api}/personal-cart/items/${encodeURIComponent(sku)}`, {
       token, method: 'PATCH', body: { delta },
     }),
     products: () => request(`${api}/products`, { token }),
+    saveAge: (dateOfBirth) => request(`${api}/auth/age`, {
+      token, method: 'POST', body: { date_of_birth: dateOfBirth },
+    }),
+    quote: (body) => request(`${api}/checkout/quotes`, { token, method: 'POST', body }),
+    placeOrder: (body, idempotencyKey) => request(`${api}/checkout/orders`, {
+      token, method: 'POST', body, idempotencyKey,
+    }),
+    order: (id, signal) => request(`${api}/orders/${encodeURIComponent(id)}`, { token, signal }),
+    orders: (before, signal) => request(
+      before ? `${api}/orders?${new URLSearchParams({ before })}` : `${api}/orders`, { token, signal },
+    ),
   }
 }
 
@@ -133,6 +158,7 @@ export function householdApi(token, householdId) {
   const listPath = (id) => `${lists}/${encodeURIComponent(id)}`
   const contributionPath = (id, sku) => `${cartPath(id)}/items/${encodeURIComponent(sku)}/contributions`
   return {
+    ...addressApi(token, `${household}/addresses`),
     carts: () => request(carts, { token }),
     create: (name, adultsOnly) => request(carts, { token, method: 'POST', body: { name, adults_only: adultsOnly } }),
     capabilities: () => request(`${household}/capabilities`, { token }),
@@ -144,9 +170,6 @@ export function householdApi(token, householdId) {
     ),
     revokeMember: (id) => request(`${household}/members/${encodeURIComponent(id)}`, { token, method: 'DELETE' }),
     createInvitation: () => request(`${household}/invitations`, { token, method: 'POST' }),
-    addresses: () => request(`${household}/addresses`, { token }),
-    createAddress: (address) => request(`${household}/addresses`, { token, method: 'POST', body: address }),
-    deleteAddress: (id) => request(`${household}/addresses/${encodeURIComponent(id)}`, { token, method: 'DELETE' }),
     grants: (id) => request(`${cartPath(id)}/grants?include_creator=true`, { token }),
     changeGrant: (id, member, grant) => request(`${cartPath(id)}/grants/${encodeURIComponent(member)}`, {
       token, method: grant ? 'PUT' : 'DELETE',

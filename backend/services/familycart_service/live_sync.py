@@ -62,6 +62,17 @@ def latest_revision(db: DatabaseConnection) -> int:
     return row["seq"] if row else 0
 
 
+def household_revision(db: DatabaseConnection, household_id: str) -> int:
+    """The latest cart revision in a household (the numbering checkout quotes are checked against)."""
+    return db.execute(
+        """SELECT COALESCE(MAX(revisions.revision), 0) AS revision
+           FROM carts JOIN checkout_cart_revisions AS revisions
+             ON revisions.cart_id = carts.id AND revisions.kind = 'household'
+           WHERE carts.household_id = ?""",
+        (household_id,),
+    ).fetchone()["revision"]
+
+
 # ---------------------------------------------------------------------------
 # "Household changed" notes, sent only after the transaction commits.
 # ---------------------------------------------------------------------------

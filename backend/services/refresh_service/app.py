@@ -22,6 +22,8 @@ from .service import (
 class SignedInUser(BaseModel):
     id: str
     display_name: str
+    is_adult: bool
+    age_setup_required: bool
 
 
 class RefreshResponse(BaseModel):
@@ -75,7 +77,8 @@ def refresh(
     return RefreshResponse(
         access_token=tokens.access_token,
         expires_in=tokens.expires_in,
-        user=SignedInUser(id=tokens.user_id, display_name=tokens.display_name),
+        user=SignedInUser(id=tokens.user_id, display_name=tokens.display_name, is_adult=tokens.is_adult,
+                          age_setup_required=tokens.age_setup_required),
     )
 
 
