@@ -65,8 +65,15 @@ class DatabaseConnection:
     def close(self) -> None:
         if self._release is not None:
             # Pooled PostgreSQL connection: hand it back instead of closing it.
-            # The pool rolls back any unfinished transaction before reusing it.
+            # Closing without commit always meant "discard"; do that ourselves so
+            # read-only callers do not trigger the pool's rollback warning.
             release, self._release = self._release, None
+            try:
+                if self.raw.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+                    self.raw.rollback()
+            except psycopg.Error:
+                pass  # a broken connection: the pool notices and replaces it
+            self.after_commit = []
             release(self.raw)
         else:
             self.raw.close()
