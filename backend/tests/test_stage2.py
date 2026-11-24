@@ -144,7 +144,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.set_milk(cart, self.child, 9).status_code, 403)
         view = live_view(
             SimpleNamespace(app=familycart_app), "demo-household", CHILD.identity, cart_id,
-            {"revision": edit["revision"], "carts": {cart_id: [edit]}},
+            None,
         )
         self.assertEqual(view["carts"], [])
         self.assertIsNone(view["cart"])
@@ -294,7 +294,7 @@ class StageTwoTests(unittest.TestCase):
             self.assertEqual(self.cart.get(deleted, headers=self.primary).status_code, 404)
             self.assertEqual(self.set_milk(deleted, self.primary, 1).status_code, 404)
         view = live_view(SimpleNamespace(app=familycart_app), "demo-household", CHILD.identity,
-                         created["id"], {"revision": 1, "carts": {created["id"]: []}})
+                         created["id"], None)
         self.assertIsNone(view["cart"])
 
     def test_catalogue_items_can_be_added_and_removed_with_age_rules(self) -> None:

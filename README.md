@@ -102,6 +102,28 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
 Copy `.env.example` to `.env`, then set `FAMILYCART_GOOGLE_CLIENT_ID` and `VITE_GOOGLE_CLIENT_ID` to the same Google OAuth Web Client ID. The frontend is configured to read the repository-root `.env` file.
 
+## Live updates and database load
+
+Changes are saved immediately, but other members' screens are updated in batches:
+
+1. After a change **commits**, the service drops a "household changed" note in Redis.
+2. Every `FAMILYCART_SYNC_INTERVAL_SECONDS` (default 30) one worker collects the notes,
+   skips households where nobody has the app open, loads the changed carts and lists
+   with a few bulk queries, and publishes **one snapshot per household**.
+3. Each open WebSocket filters that snapshot for its viewer **in memory** and pushes it.
+   Sockets make one database read when they connect, and none per update.
+
+When nothing changes, the worker does not touch the database at all. A slow sweep
+(`FAMILYCART_SYNC_SWEEP_SECONDS`, default 300) recovers any note lost during a Redis outage.
+
+Other load savers: PostgreSQL connections are pooled (`FAMILYCART_DB_POOL_MIN/MAX`),
+the gateway caches "session is active" for `FAMILYCART_SESSION_CACHE_SECONDS` (logout
+clears it immediately), fast `+`/`−` taps are combined into one request, and pasted
+lists are added with one bulk request.
+
+One Redis serves everything today. Caches can be moved to a separate instance later by
+setting `FAMILYCART_CACHE_REDIS_URL`; no code changes are needed.
+
 ## API v1
 
 | Capability | Public route |
@@ -117,6 +139,13 @@ Copy `.env.example` to `.env`, then set `FAMILYCART_GOOGLE_CLIENT_ID` and `VITE_
 | Accept an invitation | `POST /api/v1/household-invitations/accept` |
 | Shared delivery addresses | `GET/POST /api/v1/households/{household_id}/addresses` |
 | Revoke a household member | `DELETE /api/v1/households/{household_id}/members/{member_id}` |
+| Shared shopping lists | `GET/POST /api/v1/households/{household_id}/lists` |
+| Read, rename, or delete a list | `GET/PATCH/DELETE /api/v1/households/{household_id}/lists/{list_id}` |
+| Add, edit, tick, or remove list items | `POST .../lists/{list_id}/items`, `PATCH/DELETE .../items/{item_id}` |
+| Add many list items at once | `POST .../lists/{list_id}/items/bulk` |
+| Clear ticked items | `POST .../lists/{list_id}/items/clear-checked` |
+| Send list items to a cart | `POST .../lists/{list_id}/move-to-cart` |
+| Live list changes (WebSocket) | `/api/v1/households/{household_id}/lists/live` |
 | Household resources | `/api/v1/households/{household_id}/...` |
 | Live household socket | `WS /api/v1/households/{household_id}/live` |
 

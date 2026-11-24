@@ -42,7 +42,10 @@ def initialize_database(path: DatabaseTarget) -> None:
 def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[DatabaseConnection]:
     with closing(connect_database(path)) as db:
         # Writers reserve the write lock before reading membership or grants.
-        db.execute("BEGIN IMMEDIATE" if write and db.dialect == "sqlite" else "BEGIN")
+        if db.dialect == "sqlite":
+            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        # psycopg opens the PostgreSQL transaction itself on the first statement,
+        # so an explicit BEGIN would only cost an extra round trip.
         try:
             yield db
         except Exception:
@@ -148,3 +151,22 @@ def load_contributions(db: DatabaseConnection, cart_id: str) -> list[dict]:
         (cart_id,),
     )
     return [dict(row) for row in rows]
+
+
+# Shared shopping-list columns, used by the list routes and the live-update worker.
+LIST_COLUMNS = """
+    lists.id, lists.name, lists.created_by, lists.updated_at,
+    COALESCE(creator.display_name, lists.created_by) AS created_by_name
+"""
+ITEM_COLUMNS = """
+    items.id, items.list_id, items.sku, items.custom_name, items.quantity, items.note,
+    items.added_by, items.checked, items.checked_by, items.created_at, items.updated_at,
+    COALESCE(adder.display_name, items.added_by) AS added_by_name,
+    checker.display_name AS checked_by_name
+"""
+ITEM_JOINS = """
+    LEFT JOIN household_member_profiles AS adder
+      ON adder.household_id = items.household_id AND adder.user_id = items.added_by
+    LEFT JOIN household_member_profiles AS checker
+      ON checker.household_id = items.household_id AND checker.user_id = items.checked_by
+"""

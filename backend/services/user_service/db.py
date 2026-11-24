@@ -86,7 +86,9 @@ def initialize_database(path: DatabaseTarget) -> None:
 @contextmanager
 def transaction(path: DatabaseTarget) -> Iterator[DatabaseConnection]:
     with closing(connect(path)) as database:
-        database.execute("BEGIN IMMEDIATE" if database.dialect == "sqlite" else "BEGIN")
+        if database.dialect == "sqlite":
+            database.execute("BEGIN IMMEDIATE")
+        # psycopg opens the PostgreSQL transaction itself on the first statement.
         try:
             yield database
         except Exception:

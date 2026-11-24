@@ -17,11 +17,12 @@ from redis.exceptions import RedisError
 from starlette.requests import HTTPConnection
 
 from backend.shared.api import API_PREFIX
+from backend.shared.cache import cache_redis_url, live_redis_url
 from backend.shared.database import DatabaseConnection
 from backend.shared.demo_members import MEMBERS_BY_ID
 from backend.shared.tokens import Identity, load_jwt_secret, verify_token
 
-from .cart_sync import CartSync, latest_revision
+from .live_sync import AccessEnded, LiveSync, build_snapshots, latest_revision, notify_changed, viewer_role
 from .catalogue import Product, load_catalogue
 from .db import (
     active_member, contribution_quantity, database_target, delete_cart, initialize_database, load_carts,
@@ -44,7 +45,8 @@ class SetQuantity(BaseModel):
 
 
 class AdjustQuantity(BaseModel):
-    delta: int = Field(strict=True, ge=-1, le=1)
+    # Up to 99 steps at once, so the app can combine several fast taps into one request.
+    delta: int = Field(strict=True, ge=-99, le=99)
 
 
 class CartResponse(BaseModel):
@@ -147,8 +149,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.db_path = database_target()
     initialize_database(app.state.db_path)
     app.state.products = load_catalogue()
-    sync = CartSync(app.state.db_path, os.environ.get("FAMILYCART_REDIS_URL", "redis://127.0.0.1:6379/0"))
-    app.state.cart_sync = sync
+    sync = LiveSync(app.state.db_path, live_redis_url(), cache_redis_url())
+    app.state.live_sync = sync
     worker = asyncio.create_task(sync.run())
     try:
         yield
@@ -214,6 +216,7 @@ def change_cart(
 def record_cart_change(
     db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None = None
 ) -> int:
+    notify_changed(db, household_id)
     if db.dialect == "postgresql":
         row = db.execute(
             "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?) RETURNING id",
@@ -354,7 +357,7 @@ def adjust_personal_cart_item(
     sku: SKU, body: AdjustQuantity, request: Request, caller: Caller
 ) -> PersonalCartItem:
     if body.delta == 0:
-        raise HTTPException(status_code=422, detail="Quantity adjustment must be 1 or -1")
+        raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
     visible_product(request, sku, caller)
     now = datetime.now(timezone.utc).isoformat()
     with transaction(request.app.state.db_path, write=True) as db:
@@ -931,41 +934,48 @@ def adjust_shared_quantity(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         if body.delta == 0:
-            raise HTTPException(status_code=422, detail="Quantity adjustment must be 1 or -1")
+            raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
         total = shared_quantity(db, cart_id, sku)
         if body.delta > 0:
             require_product_for_cart(request, sku, caller, cart)
-            if total >= MAX_QUANTITY:
+            if total + body.delta > MAX_QUANTITY:
                 raise HTTPException(status_code=409, detail="Maximum quantity reached")
-            contributor_id = caller.user_id
-            quantity = contribution_quantity(db, cart_id, sku, contributor_id) + 1
+            own = contribution_quantity(db, cart_id, sku, caller.user_id)
+            set_contribution(db, household_id, cart_id, sku, caller.user_id, own + body.delta)
+            total += body.delta
         elif total == 0:
             return SharedItemUpdate(sku=sku, quantity=0, revision=latest_revision(db))
         else:
-            if is_primary:
-                contribution = db.execute(
-                    """SELECT contributor_id, quantity FROM cart_item_contributions
-                       WHERE cart_id = ? AND sku = ?
-                       ORDER BY CASE WHEN contributor_id = ? THEN 0 ELSE 1 END, contributor_id
-                       LIMIT 1""",
-                    (cart_id, sku, caller.user_id),
-                ).fetchone()
-            else:
-                contribution = db.execute(
-                    """SELECT contributor_id, quantity FROM cart_item_contributions
-                       WHERE cart_id = ? AND sku = ? AND contributor_id = ?""",
-                    (cart_id, sku, caller.user_id),
-                ).fetchone()
+            # Several fast taps arrive as one request; apply the one-step rule for each.
+            # The primary removes their own units first, then other members'; a member
+            # may only remove units they added themselves.
+            removed = 0
+            for _ in range(-body.delta):
+                if is_primary:
+                    contribution = db.execute(
+                        """SELECT contributor_id, quantity FROM cart_item_contributions
+                           WHERE cart_id = ? AND sku = ?
+                           ORDER BY CASE WHEN contributor_id = ? THEN 0 ELSE 1 END, contributor_id
+                           LIMIT 1""",
+                        (cart_id, sku, caller.user_id),
+                    ).fetchone()
+                else:
+                    contribution = db.execute(
+                        """SELECT contributor_id, quantity FROM cart_item_contributions
+                           WHERE cart_id = ? AND sku = ? AND contributor_id = ?""",
+                        (cart_id, sku, caller.user_id),
+                    ).fetchone()
                 if contribution is None:
-                    raise HTTPException(
-                        status_code=403,
-                        detail="You can only remove items that you added.",
-                    )
-            contributor_id = contribution["contributor_id"]
-            quantity = contribution["quantity"] - 1
-        set_contribution(db, household_id, cart_id, sku, contributor_id, quantity)
+                    if removed == 0 and not is_primary:
+                        raise HTTPException(status_code=403, detail="You can only remove items that you added.")
+                    break
+                set_contribution(
+                    db, household_id, cart_id, sku, contribution["contributor_id"], contribution["quantity"] - 1,
+                )
+                removed += 1
+                total -= 1
         revision = record_cart_change(db, household_id, cart_id, caller.user_id)
-        return SharedItemUpdate(sku=sku, quantity=total + body.delta, revision=revision)
+        return SharedItemUpdate(sku=sku, quantity=total, revision=revision)
 
 
 @app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}/items/{{sku}}")
@@ -1001,7 +1011,7 @@ def adjust_quantity(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         if body.delta == 0:
-            raise HTTPException(status_code=422, detail="Quantity adjustment must be 1 or -1")
+            raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
         if body.delta > 0:
             require_product_for_cart(request, sku, caller, cart)
         quantity = max(0, contribution_quantity(db, cart_id, sku, caller.user_id) + body.delta)
@@ -1021,43 +1031,97 @@ def remove_contribution(
         return save_quantity(db, household_id, cart_id, sku, contributor_id, 0, caller.user_id)
 
 
-def live_view(
-    socket: WebSocket, household_id: str, caller: Identity, cart_id: str | None, batch: dict | None
+def view_for(
+    connection: HTTPConnection, snapshot: dict, caller: Identity, cart_id: str | None, *, batch: bool
 ) -> dict:
-    with household_access(socket, household_id, caller) as (db, is_primary):
-        carts = visible_carts(db, household_id, caller, is_primary)
-        revision = batch["revision"] if batch else latest_revision(db)
-        view = {
-            "revision": revision,
-            "carts": [cart.model_dump() for cart in carts],
-            "household_role": "primary" if is_primary else "member",
-            "can_create_adults_only_cart": can_create_adults_only_cart(caller, is_primary),
-            # Every household member may see display names so cart activity can
-            # be attributed. Roles and age flags remain primary-only fields.
-            "members": [
-                member.model_dump()
-                for member in household_members(db, household_id, include_roles=is_primary)
-            ],
-        }
-        if cart_id is None:
-            return view
-        selected = next((cart for cart in carts if cart.id == cart_id), None)
-        if selected is None:
-            view["cart"] = None
-            row = load_carts(db, household_id, caller.user_id, cart_id).fetchone()
-            if row is not None and not (bool(row["adults_only"]) and not caller.is_adult):
-                view["access_notice"] = cart_access_revoked_message(db, household_id)
-        elif batch is None or cart_id in batch["carts"]:
-            contributions = batch["carts"][cart_id] if batch else load_contributions(db, cart_id)
-            view["actor_id"] = batch.get("actors", {}).get(cart_id) if batch else None
-            view["cart"] = {
-                **selected.model_dump(),
-                "can_delete_cart": can_delete_cart(db, selected, caller),
-                "contributions": visible_contributions(socket, caller, contributions),
-            }
-            if selected.can_manage_access:
-                view["grants"] = cart_grantees(db, selected, include_creator=True)
+    """What one viewer's cart page should show, worked out in memory from a household snapshot.
+
+    Mirrors the REST rules: cart_access() decides visibility, the member list hides
+    roles and age flags from non-primaries, and only the primary sees cart grants.
+    """
+    is_primary = viewer_role(snapshot, caller.user_id)
+    members = sorted((member for member in snapshot["members"] if member["active"]), key=lambda member: member["id"])
+    carts = []
+    for cart in snapshot["carts"]:
+        if cart["deleted"]:
+            continue
+        visible = cart_access({**cart, "has_grant": caller.user_id in cart["grants"]}, caller, is_primary)
+        if visible is not None:
+            carts.append(visible)
+    view = {
+        "revision": snapshot["revision"],
+        "carts": [cart.model_dump() for cart in carts],
+        "household_role": "primary" if is_primary else "member",
+        "can_create_adults_only_cart": can_create_adults_only_cart(caller, is_primary),
+        # Every household member may see display names so cart activity can
+        # be attributed. Roles and age flags remain primary-only fields.
+        "members": [
+            MemberResponse(
+                id=member["id"], display_name=member["display_name"],
+                role=("primary" if member["id"] == snapshot["owner_id"] else "member") if is_primary else None,
+                is_adult=member["is_adult"] if is_primary else None,
+            ).model_dump()
+            for member in members
+        ],
+    }
+    if cart_id is None:
         return view
+    selected = next((cart for cart in carts if cart.id == cart_id), None)
+    if selected is None:
+        view["cart"] = None
+        row = next((cart for cart in snapshot["carts"] if cart["id"] == cart_id and not cart["deleted"]), None)
+        if row is not None and not (row["adults_only"] and not caller.is_adult):
+            owner = snapshot["owner_name"]
+            view["access_notice"] = f"You no longer have access to this cart. Contact {owner}, the primary account holder."
+    elif not batch or cart_id in snapshot["changed_carts"]:
+        view["actor_id"] = snapshot["actors"].get(cart_id) if batch else None
+        view["cart"] = {
+            **selected.model_dump(),
+            "can_delete_cart": selected.can_manage_access,
+            "contributions": visible_contributions(connection, caller, snapshot["changed_carts"].get(cart_id, [])),
+        }
+        if selected.can_manage_access:
+            view["grants"] = snapshot_grantees(snapshot, cart_id)
+    return view
+
+
+def snapshot_grantees(snapshot: dict, cart_id: str) -> list[str]:
+    """In-memory version of cart_grantees(include_creator=True) for live updates."""
+    cart = next(cart for cart in snapshot["carts"] if cart["id"] == cart_id)
+    ids = [
+        member["id"] for member in sorted(snapshot["members"], key=lambda member: member["id"])
+        if member["active"] and member["id"] != snapshot["owner_id"]
+        and (member["id"] in cart["grants"] or (member["id"] == cart["creator_id"] and not cart["creator_revoked"]))
+    ]
+    if cart["adults_only"]:
+        adults = {member["id"] for member in snapshot["members"] if member["grant_adult"]}
+        ids = [member_id for member_id in ids if member_id in adults]
+    return ids
+
+
+def initial_snapshot(db_path, household_id: str, cart_id: str | None) -> dict:
+    with transaction(db_path) as db:
+        snapshots, _ = build_snapshots(
+            db, [household_id], include_events=False,
+            carts_to_load={household_id: {cart_id}} if cart_id else None,
+        )
+        if household_id not in snapshots:
+            raise AccessEnded("Household not found")
+        snapshot = snapshots[household_id]
+        snapshot["revision"] = latest_revision(db)
+        return snapshot
+
+
+def live_view(
+    connection: HTTPConnection, household_id: str, caller: Identity, cart_id: str | None, batch: dict | None = None
+) -> dict:
+    """The cart page view for one viewer: from a published batch, or freshly from the database."""
+    try:
+        snapshot = batch if batch is not None else initial_snapshot(connection.app.state.db_path, household_id, cart_id)
+        return view_for(connection, snapshot, caller, cart_id, batch=batch is not None)
+    except AccessEnded as ended:
+        status = 404 if ended.reason == "Household not found" else 403
+        raise HTTPException(status_code=status, detail=ended.reason) from None
 
 
 @app.websocket(f"{HOUSEHOLD}/live")
@@ -1068,7 +1132,7 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
         await socket.close(code=4403)
         return
     await socket.accept()
-    sync = socket.app.state.cart_sync
+    sync = socket.app.state.live_sync
     secret = socket.app.state.jwt_secret
     try:
         authorization = await asyncio.wait_for(socket.receive(), timeout=5)
@@ -1081,26 +1145,36 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
             raise InvalidTokenError("Expected token")
         caller = verify_token(token, secret)
         async with sync.subscriber.pubsub() as pubsub:
-            channel = sync.channel(household_id)
-            await pubsub.subscribe(channel)
+            await pubsub.subscribe(sync.channel(household_id))
             subscribed = await pubsub.get_message(timeout=5)
             if not subscribed or subscribed["type"] != "subscribe":
                 await socket.close(code=1013)
                 return
+            # The only database read this socket makes: its starting view.
             view = await asyncio.to_thread(live_view, socket, household_id, caller, cart_id, None)
             revision = view["revision"]
             await socket.send_json(view)
+            await sync.mark_online(household_id)
+            last_presence = asyncio.get_running_loop().time()
             disconnect = asyncio.create_task(socket.receive())
             try:
                 while not disconnect.done():
                     message = await pubsub.get_message(timeout=1)
                     verify_token(token, secret)
-                    if not message:
+                    now = asyncio.get_running_loop().time()
+                    if now - last_presence >= sync.interval / 2:
+                        await sync.mark_online(household_id)
+                        last_presence = now
+                    if not message or message["type"] != "message":
                         continue
-                    batch = json.loads(message["data"]) if message["type"] == "message" else None
-                    if batch is not None and batch["revision"] <= revision:
+                    batch = json.loads(message["data"])
+                    if batch["revision"] is None or batch["revision"] <= revision:
+                        # Nothing new for carts (e.g. a lists-only batch), but still
+                        # notice if this viewer was removed from the household.
+                        live_view(socket, household_id, caller, None, batch)
                         continue
-                    view = await asyncio.to_thread(live_view, socket, household_id, caller, cart_id, batch)
+                    # Built in memory from the shared snapshot: no database query per viewer.
+                    view = live_view(socket, household_id, caller, cart_id, batch)
                     revision = view["revision"]
                     await socket.send_json(view)
             finally:
@@ -1115,3 +1189,10 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
         await socket.close(code=4404, reason=str(error.detail)[:123])
     except RedisError:
         await socket.close(code=1013)
+
+
+# Shopping-list routes reuse the access helpers above, so they are registered
+# after everything they import has been defined.
+from . import lists  # noqa: E402
+
+app.include_router(lists.router)

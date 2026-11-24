@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from backend.services.user_service.db import connect, transaction, upsert_user
+from backend.shared.cache import forget_session
 from backend.shared.database import DatabaseTarget
 from backend.shared.tokens import ACCESS_TOKEN_LIFETIME, Identity, issue_token
 
@@ -129,6 +130,7 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
                     (now.isoformat(), session_id),
                 )
                 database.commit()
+                forget_session(session_id)
                 raise RefreshTokenReuse("Invalid or expired session")
             raise InvalidRefreshToken("Invalid or expired session")
 
@@ -171,6 +173,9 @@ def revoke_session(path: DatabaseTarget, session_id: str) -> None:
             "UPDATE refresh_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE session_id = ?",
             (now, session_id),
         )
+    # The gateway caches "this session is active" briefly; clear it so the
+    # logout applies to the very next request rather than after the cache expires.
+    forget_session(session_id)
 
 
 def session_is_active(path: DatabaseTarget, session_id: str, user_id: str) -> bool:

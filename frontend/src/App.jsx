@@ -5,6 +5,7 @@ import {
   refreshAccessToken, restoreSession, signInWithGoogle,
 } from './api.js'
 import { CartDetail } from './CartDetail.jsx'
+import { ShoppingLists } from './ShoppingLists.jsx'
 import { applyCartSnapshot, cartActivity } from './cartState.js'
 import './styles.css'
 
@@ -292,7 +293,7 @@ function PersonalAddresses({ addresses, session, busy, required = false, onSave,
 function HouseholdDashboard({
   household, households, session, carts, members, addresses, busy, invitation, onBack, onCreate,
   onJoin, onSelectHousehold, onInvite, onRevoke, onTransferHousehold, onAddress,
-  onDeleteAddress, onOpenCart, onShopCart, onCreateCart, onDeleteCart,
+  onDeleteAddress, onOpenCart, onShopCart, onCreateCart, onDeleteCart, onOpenLists,
 }) {
   const [cartName, setCartName] = useState('')
   const [adultsOnly, setAdultsOnly] = useState(false)
@@ -368,6 +369,13 @@ function HouseholdDashboard({
               </li>)}
             </ul>
           </section>
+          <section className="panel dashboard-lists">
+            <div>
+              <h2>Shared shopping lists</h2>
+              <p className="muted">Plan together, tick items off, then send them to a cart in one tap.</p>
+            </div>
+            <button onClick={onOpenLists}>Open lists →</button>
+          </section>
           <section className="panel dashboard-addresses">
             <h2>Shared delivery addresses</h2>
             <AddressForm busy={busy} displayName={session.user.display_name} onSave={onAddress} />
@@ -412,6 +420,8 @@ function App() {
   const [cartNotices, setCartNotices] = useState([])
   const noticeSequence = useRef(0)
   const productNames = useRef(new Map())
+  // sku -> { delta, timer, product }: + / − taps waiting to be sent as one request.
+  const pendingTaps = useRef(new Map())
   const token = session?.access_token
   const cartId = detail?.cart.id
   const liveCartId = cartId ?? shoppingCartId
@@ -541,7 +551,7 @@ function App() {
             const next = applyCartSnapshot(current, snapshot.cart, snapshot.revision)
             return next !== current && snapshot.grants ? { ...next, grants: snapshot.grants } : next
           })
-          else setQuantities(sharedCartQuantities(snapshot.cart.contributions))
+          else setQuantities(withPendingTaps(sharedCartQuantities(snapshot.cart.contributions)))
         }
       }
       socket.onclose = async ({ code, reason }) => {
@@ -592,6 +602,46 @@ function App() {
     setView('shop')
   }
 
+  /** Add taps that have not been sent yet on top of quantities from the server. */
+  function withPendingTaps(quantities) {
+    const next = { ...quantities }
+    for (const [sku, entry] of pendingTaps.current) next[sku] = Math.max(0, (next[sku] ?? 0) + entry.delta)
+    return next
+  }
+
+  /** Show a tap immediately; send all taps on the same product as one request after a short pause. */
+  function queueAdjust(product, delta) {
+    const entry = pendingTaps.current.get(product.sku) ?? { delta: 0, product }
+    entry.delta = Math.max(-99, Math.min(99, entry.delta + delta))
+    setQuantities((current) => ({ ...current, [product.sku]: Math.max(0, (current[product.sku] ?? 0) + delta) }))
+    window.clearTimeout(entry.timer)
+    entry.timer = window.setTimeout(() => flushTaps(product.sku), 400)
+    pendingTaps.current.set(product.sku, entry)
+  }
+
+  async function flushTaps(sku) {
+    const entry = pendingTaps.current.get(sku)
+    pendingTaps.current.delete(sku)
+    if (!entry || entry.delta === 0) return
+    try {
+      await adjustProduct(entry.product, entry.delta)
+    } catch (error) {
+      if (error.status === 401) { clearSession(); return }
+      if (error.status === 403) showPopup(error.message, 'error')
+      else setFeedback({ error: true, text: error.message })
+      // Put the screen back in line with what was actually saved.
+      try {
+        if (household && shoppingCartId) {
+          const cart = await api.cart(shoppingCartId)
+          setQuantities(withPendingTaps(sharedCartQuantities(cart.contributions)))
+        } else if (account) {
+          const personalCart = await account.personalCart()
+          setQuantities(withPendingTaps(Object.fromEntries(personalCart.items.map((item) => [item.sku, item.quantity]))))
+        }
+      } catch { /* the next live update will correct it */ }
+    }
+  }
+
   async function adjustProduct(product, delta) {
     let update
     if (!household) {
@@ -606,7 +656,9 @@ function App() {
       }
       update = await api.adjustSharedQuantity(cart.id, product.sku, delta)
     }
-    setQuantities((current) => ({ ...current, [product.sku]: update.quantity }))
+    // Taps made while this request was running are still waiting; keep them on top.
+    const waiting = pendingTaps.current.get(product.sku)?.delta ?? 0
+    setQuantities((current) => ({ ...current, [product.sku]: Math.max(0, update.quantity + waiting) }))
   }
 
   async function updateItem(save) {
@@ -631,6 +683,9 @@ function App() {
               try { await logoutSession(token) } finally { clearSession() }
             })}>Sign out</button></div> :
             !restoringSession && <button className="header-login" onClick={() => setAuthOpen(true)}>Login / Register</button>}
+          {session && household && <button className="header-lists" onClick={() => { setDetail(null); setView('lists') }}>
+            📝 Lists
+          </button>}
           {session && <button className="header-household" onClick={() => setView('household')}>
             {household ? 'Household account' : '+ Create household'}
           </button>}
@@ -687,10 +742,24 @@ function App() {
                   setQuantities({})
                 }
               })} />
-          </> : view === 'personal-cart' ?
+          </> : view === 'lists' && household ?
+            <ShoppingLists api={api} token={token} household={household} user={session.user} products={products}
+              carts={carts} defaultCartId={shoppingCartId} onBack={() => setView('shop')}
+              onNotify={(text, kind) => showPopup(text, kind)}
+              onCartChanged={async (id) => {
+                if (id === shoppingCartId) {
+                  const cart = await api.cart(id).catch(() => null)
+                  if (cart) setQuantities(sharedCartQuantities(cart.contributions))
+                }
+              }}
+              onAccessLost={(reason) => {
+                setView('shop')
+                showPopup(reason || 'Your household access was revoked. Contact the primary account holder.', 'error')
+              }} />
+          : view === 'personal-cart' ?
             <PersonalCartView products={products} quantities={quantities} busy={busy}
               onBack={() => setView('shop')}
-              onAdjust={(product, delta) => run(() => adjustProduct(product, delta))} /> :
+              onAdjust={queueAdjust} /> :
           view === 'household' ?
             <HouseholdDashboard household={household} households={households} session={session} carts={carts} members={members}
               addresses={addresses} busy={busy} invitation={invitation} onBack={() => setView('shop')}
@@ -720,6 +789,7 @@ function App() {
               })}
               onDeleteAddress={(id) => run(async () => { await api.deleteAddress(id); setAddresses(await api.addresses()) })}
               onOpenCart={(id) => run(() => openCart(id))}
+              onOpenLists={() => setView('lists')}
               onShopCart={(id) => run(() => selectShoppingCart(id))}
               onCreateCart={(name, adultsOnly) => run(async () => {
                 const created = await api.create(name, adultsOnly)
@@ -746,7 +816,7 @@ function App() {
               canOpenCart={Object.values(quantities).some((quantity) => quantity > 0)}
               householdCarts={household ? carts : []} activeCartId={shoppingCartId}
               onSelectCart={(id) => run(() => selectShoppingCart(id))}
-              onAdjust={(product, delta) => run(() => adjustProduct(product, delta))}
+              onAdjust={queueAdjust}
               onOpenCart={() => {
                 const cart = carts.find((candidate) => candidate.id === shoppingCartId)
                 if (cart) run(() => openCart(cart.id))

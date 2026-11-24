@@ -143,3 +143,45 @@ CREATE TABLE IF NOT EXISTS cart_sync_events (
     actor_id TEXT,
     FOREIGN KEY (household_id, cart_id) REFERENCES carts (household_id, id)
 );
+
+CREATE TABLE IF NOT EXISTS shopping_lists (
+    id TEXT PRIMARY KEY,
+    household_id TEXT NOT NULL REFERENCES households(id),
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT,
+    UNIQUE (household_id, id),
+    FOREIGN KEY (household_id, created_by)
+        REFERENCES household_members (household_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS shopping_lists_household_idx
+    ON shopping_lists (household_id, created_at);
+
+CREATE TABLE IF NOT EXISTS shopping_list_items (
+    id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL,
+    household_id TEXT NOT NULL,
+    sku TEXT,
+    custom_name TEXT,
+    quantity INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity BETWEEN 1 AND 999),
+    note TEXT,
+    added_by TEXT NOT NULL,
+    checked INTEGER NOT NULL DEFAULT 0 CHECK (checked IN (0, 1)),
+    checked_by TEXT,
+    checked_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (sku IS NOT NULL OR custom_name IS NOT NULL),
+    FOREIGN KEY (household_id, list_id) REFERENCES shopping_lists (household_id, id),
+    FOREIGN KEY (household_id, added_by) REFERENCES household_members (household_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS shopping_list_items_list_idx
+    ON shopping_list_items (list_id, checked, created_at);
+
+-- Live-update worker: "which lists changed?" and per-household event lookups.
+CREATE INDEX IF NOT EXISTS shopping_lists_updated_idx ON shopping_lists (updated_at);
+CREATE INDEX IF NOT EXISTS cart_sync_events_household_idx ON cart_sync_events (household_id, id);

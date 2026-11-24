@@ -65,11 +65,20 @@ async function request(path, { token, method = 'GET', body, retry = true } = {})
   if (response.status === 204) return
 
   const data = await response.json().catch(() => null)
-  if (!response.ok || data === null) {
-    const message = typeof data?.detail === 'string' ? data.detail : `Request failed (${response.status}).`
-    throw new ApiError(response.status, message)
-  }
+  if (!response.ok || data === null) throw new ApiError(response.status, errorMessage(data, response.status))
   return data
+}
+
+/** A readable message from an error response, including FastAPI's 422 validation lists. */
+function errorMessage(data, status) {
+  if (typeof data?.detail === 'string') return data.detail
+  if (Array.isArray(data?.detail) && data.detail.length > 0) {
+    const [first] = data.detail
+    const field = Array.isArray(first.loc) ? first.loc.filter((part) => part !== 'body').join('.') : ''
+    return field ? `${field}: ${first.msg}` : String(first.msg ?? `Request failed (${status}).`)
+  }
+  if (status === 422) return 'The server did not accept this request. Try reloading the page.'
+  return `Request failed (${status}).`
 }
 
 export async function signInWithGoogle(credential) {
@@ -120,6 +129,8 @@ export function householdApi(token, householdId) {
   const household = `${api}/households/${encodeURIComponent(householdId)}`
   const carts = `${household}/carts`
   const cartPath = (id) => `${carts}/${encodeURIComponent(id)}`
+  const lists = `${household}/lists`
+  const listPath = (id) => `${lists}/${encodeURIComponent(id)}`
   const contributionPath = (id, sku) => `${cartPath(id)}/items/${encodeURIComponent(sku)}/contributions`
   return {
     carts: () => request(carts, { token }),
@@ -156,7 +167,32 @@ export function householdApi(token, householdId) {
     removeContribution: (id, sku, contributor) => request(`${contributionPath(id, sku)}/${encodeURIComponent(contributor)}`, {
       token, method: 'DELETE',
     }),
+    lists: () => request(lists, { token }),
+    createList: (name) => request(lists, { token, method: 'POST', body: { name } }),
+    list: (id) => request(listPath(id), { token }),
+    renameList: (id, name) => request(listPath(id), { token, method: 'PATCH', body: { name } }),
+    deleteList: (id) => request(listPath(id), { token, method: 'DELETE' }),
+    addListItem: (id, item) => request(`${listPath(id)}/items`, { token, method: 'POST', body: item }),
+    addListItems: (id, items) => request(`${listPath(id)}/items/bulk`, { token, method: 'POST', body: { items } }),
+    updateListItem: (id, itemId, changes) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
+      token, method: 'PATCH', body: changes,
+    }),
+    deleteListItem: (id, itemId) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
+      token, method: 'DELETE',
+    }),
+    clearCheckedItems: (id) => request(`${listPath(id)}/items/clear-checked`, { token, method: 'POST' }),
+    moveListToCart: (id, target, itemIds) => request(`${listPath(id)}/move-to-cart`, {
+      token, method: 'POST', body: { target, item_ids: itemIds },
+    }),
   }
+}
+
+export function connectLists(token, householdId) {
+  const url = new URL(`${api}/households/${encodeURIComponent(householdId)}/lists/live`, window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  const socket = new WebSocket(url)
+  socket.addEventListener('open', () => socket.send(JSON.stringify({ token: activeAccessToken || token })))
+  return socket
 }
 
 export function connectCarts(token, householdId, cartId) {

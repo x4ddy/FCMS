@@ -1,16 +1,24 @@
+import atexit
+import logging
+import os
 import sqlite3
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeAlias
 
 try:
     import psycopg
     from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
 except ImportError:  # SQLite-only unit tests can run before optional production dependencies are installed.
     psycopg = None
     dict_row = None
+    ConnectionPool = None
 
 
 DatabaseTarget: TypeAlias = Path | str
+logger = logging.getLogger(__name__)
 
 
 def is_postgres_target(target: DatabaseTarget) -> bool:
@@ -23,9 +31,13 @@ def _postgres_query(query: str) -> str:
 
 
 class DatabaseConnection:
-    def __init__(self, raw: Any, dialect: str):
+    def __init__(self, raw: Any, dialect: str, release: Callable[[Any], None] | None = None):
         self.raw = raw
         self.dialect = dialect
+        self._release = release
+        # Callbacks that must only run once the current transaction is durable,
+        # e.g. telling the live-update worker that a household changed.
+        self.after_commit: list[Callable[[], None]] = []
 
     def execute(self, query: str, parameters: Any = None):
         sql = _postgres_query(query) if self.dialect == "postgresql" else query
@@ -39,12 +51,25 @@ class DatabaseConnection:
 
     def commit(self) -> None:
         self.raw.commit()
+        callbacks, self.after_commit = self.after_commit, []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:  # A notification must never turn a committed write into an error.
+                logger.exception("After-commit callback failed")
 
     def rollback(self) -> None:
         self.raw.rollback()
+        self.after_commit = []
 
     def close(self) -> None:
-        self.raw.close()
+        if self._release is not None:
+            # Pooled PostgreSQL connection: hand it back instead of closing it.
+            # The pool rolls back any unfinished transaction before reusing it.
+            release, self._release = self._release, None
+            release(self.raw)
+        else:
+            self.raw.close()
 
     def __enter__(self):
         return self
@@ -56,12 +81,60 @@ class DatabaseConnection:
             self.rollback()
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQL connection pools: one per database URL per process. Opening a
+# connection (network handshake, password check, a new server process) costs
+# far more than a typical query, so connections are opened once and reused.
+# ---------------------------------------------------------------------------
+_pools: dict[str, Any] = {}
+_pools_lock = threading.Lock()
+
+
+def _pool_for(url: str):
+    pool = _pools.get(url)
+    if pool is not None:
+        return pool
+    with _pools_lock:
+        pool = _pools.get(url)
+        if pool is None:
+            pool = ConnectionPool(
+                url,
+                min_size=int(os.environ.get("FAMILYCART_DB_POOL_MIN", "1")),
+                max_size=int(os.environ.get("FAMILYCART_DB_POOL_MAX", "10")),
+                # How long a request waits for a free connection before failing clearly.
+                timeout=float(os.environ.get("FAMILYCART_DB_POOL_TIMEOUT", "10")),
+                # Recycle connections periodically and drop ones that went stale.
+                max_lifetime=1800,
+                max_idle=300,
+                check=ConnectionPool.check_connection,
+                kwargs={"row_factory": dict_row},
+                name=f"familycart-{len(_pools) + 1}",
+                open=True,
+            )
+            _pools[url] = pool
+        return pool
+
+
+def close_pools() -> None:
+    with _pools_lock:
+        pools = list(_pools.values())
+        _pools.clear()
+    for pool in pools:
+        pool.close()
+
+
+atexit.register(close_pools)
+
+
 def connect_database(target: DatabaseTarget) -> DatabaseConnection:
     if is_postgres_target(target):
-        if psycopg is None:
+        if psycopg is None or ConnectionPool is None:
             raise RuntimeError("PostgreSQL requires: python -m pip install -r backend/requirements.txt")
-        return DatabaseConnection(psycopg.connect(str(target), row_factory=dict_row), "postgresql")
+        pool = _pool_for(str(target))
+        return DatabaseConnection(pool.getconn(), "postgresql", release=pool.putconn)
 
+    # SQLite is a local file with no network or login, so connections are cheap
+    # and pooling would add nothing.
     database = sqlite3.connect(Path(target), timeout=10)
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA foreign_keys = ON")

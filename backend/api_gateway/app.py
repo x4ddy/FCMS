@@ -14,6 +14,7 @@ from jwt import InvalidTokenError
 from starlette.responses import Response
 
 from backend.services.refresh_service.service import session_is_active
+from backend.shared.cache import RedisError, async_client, cache_breaker, cache_redis_url, session_cache_seconds, session_key
 from backend.services.user_service.db import database_path, initialize_database
 from backend.shared.api import API_PREFIX
 from backend.shared.tokens import load_jwt_secret, verify_token
@@ -72,7 +73,31 @@ def _bearer_token(authorization: str | None) -> str:
     return authorization[7:]
 
 
-def _validate_access(app: FastAPI, token: str) -> None:
+async def _session_active(app: FastAPI, session_id: str, user_id: str) -> bool:
+    """Is this login session still active? Cached briefly in Redis so most requests skip the user database.
+
+    Logout clears the cache entry immediately (see refresh_service.service.revoke_session),
+    so caching only delays changes made directly in the database, by at most the cache lifetime.
+    """
+    ttl = session_cache_seconds()
+    cache = app.state.cache
+    key = session_key(session_id)
+    if ttl and cache_breaker.available():
+        try:
+            if await cache.get(key) == user_id:
+                return True
+        except RedisError as error:
+            cache_breaker.failed(error)
+    active = await asyncio.to_thread(session_is_active, app.state.user_db_path, session_id, user_id)
+    if active and ttl and cache_breaker.available():
+        try:
+            await cache.set(key, user_id, ex=ttl)
+        except RedisError as error:
+            cache_breaker.failed(error)
+    return active
+
+
+async def _validate_access(app: FastAPI, token: str) -> None:
     try:
         identity = verify_token(token, app.state.jwt_secret)
     except InvalidTokenError:
@@ -81,9 +106,7 @@ def _validate_access(app: FastAPI, token: str) -> None:
             detail="Missing or invalid bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
-    if not identity.session_id or not session_is_active(
-        app.state.user_db_path, identity.session_id, identity.user_id
-    ):
+    if not identity.session_id or not await _session_active(app, identity.session_id, identity.user_id):
         raise HTTPException(
             status_code=401,
             detail="Session has ended",
@@ -113,10 +136,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.refresh_url = os.environ.get("FAMILYCART_REFRESH_URL", "http://127.0.0.1:8003")
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
     app.state.limiter = SlidingWindowLimiter()
+    app.state.cache = async_client(cache_redis_url())
     try:
         yield
     finally:
         await app.state.http.aclose()
+        await app.state.cache.aclose()
 
 
 app = FastAPI(title="FamilyCart API Gateway", lifespan=lifespan)
@@ -163,7 +188,7 @@ async def proxy(path: str, request: Request) -> Response:
         _validate_origin(request)
 
     if not path.startswith(PUBLIC_PREFIXES):
-        _validate_access(request.app, _bearer_token(request.headers.get("authorization")))
+        await _validate_access(request.app, _bearer_token(request.headers.get("authorization")))
 
     content_length = request.headers.get("content-length")
     if content_length:
@@ -208,7 +233,7 @@ async def websocket_proxy(websocket: WebSocket, path: str) -> None:
         token = payload.get("token") if isinstance(payload, dict) else None
         if not isinstance(token, str):
             raise ValueError
-        _validate_access(websocket.app, token)
+        await _validate_access(websocket.app, token)
     except (asyncio.TimeoutError, json.JSONDecodeError, ValueError, HTTPException):
         await websocket.close(code=4401)
         return
