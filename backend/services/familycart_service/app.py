@@ -1312,6 +1312,7 @@ def view_for(
             view["access_notice"] = f"You no longer have access to this cart. Contact {owner}, the primary account holder."
     elif not batch or cart_id in snapshot["changed_carts"]:
         view["actor_id"] = snapshot["actors"].get(cart_id) if batch else None
+        view["actor_ids"] = snapshot.get("cart_actors", {}).get(cart_id, []) if batch else []
         view["cart"] = {
             **selected.model_dump(),
             "can_delete_cart": selected.can_manage_access,

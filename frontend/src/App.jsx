@@ -580,6 +580,7 @@ function App() {
               snapshot.actor_id,
               memberNames,
               productNames.current,
+              snapshot.actor_ids,
             ), snapshot.cart.name)
           }
           previousContributions = snapshot.cart.contributions

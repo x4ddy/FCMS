@@ -136,7 +136,7 @@ def build_snapshots(
         snapshot = snapshots.setdefault(row["household_id"], {
             "household_id": row["household_id"], "owner_id": row["owner_id"],
             "owner_name": "the primary account holder", "revision": None, "members": [],
-            "carts": [], "changed_carts": {}, "actors": {}, "lists": [],
+            "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "lists": [],
         })
         fixture = MEMBERS_BY_ID.get(row["user_id"])
         fixture_adult = bool(fixture and fixture.identity.is_adult)
@@ -198,6 +198,11 @@ def build_snapshots(
             changed[row["household_id"]].add(row["cart_id"])
             # Events are ordered, so the last one wins: the most recent actor per cart.
             snapshot["actors"][row["cart_id"]] = row["actor_id"]
+            # Everyone who changed this cart in the batch, in order. Several members
+            # can edit the same cart within one interval; notifications need them all.
+            people = snapshot["cart_actors"].setdefault(row["cart_id"], [])
+            if row["actor_id"] and row["actor_id"] not in people:
+                people.append(row["actor_id"])
             snapshot["revision"] = row["id"]
 
     changed_cart_ids = sorted({cart for carts in changed.values() for cart in carts})

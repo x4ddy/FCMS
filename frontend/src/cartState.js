@@ -7,7 +7,21 @@ function contributionQuantities(contributions = []) {
   ]))
 }
 
-export function cartActivity(previous, current, currentUserId, actorId, memberNames, productNames) {
+/**
+ * Who made one change. Live updates arrive in batches, so several people may
+ * have edited the cart since the last snapshot (`actorIds`, in order).
+ * - Adding always goes to the adder's own line, so the line's owner added it.
+ * - A removal is the owner's own if they acted in this batch; otherwise someone
+ *   else removed it (the primary, or checkout emptying the cart).
+ */
+function responsibleFor(contributorId, difference, actorId, actorIds) {
+  if (!actorIds) return actorId ?? contributorId
+  if (difference > 0 || actorIds.includes(contributorId)) return contributorId
+  const others = actorIds.filter((id) => id !== contributorId)
+  return others.at(-1) ?? actorId ?? contributorId
+}
+
+export function cartActivity(previous, current, currentUserId, actorId, memberNames, productNames, actorIds = null) {
   const before = contributionQuantities(previous)
   const after = contributionQuantities(current)
   const keys = new Set([...before.keys(), ...after.keys()])
@@ -17,7 +31,7 @@ export function cartActivity(previous, current, currentUserId, actorId, memberNa
     const contributorId = key.slice(0, separator)
     const sku = key.slice(separator + 1)
     const difference = (after.get(key) ?? 0) - (before.get(key) ?? 0)
-    const responsibleUserId = actorId ?? contributorId
+    const responsibleUserId = responsibleFor(contributorId, difference, actorId, actorIds)
     if (!difference || responsibleUserId === currentUserId) return []
     const person = memberNames.get(responsibleUserId) ?? 'A household member'
     const product = productNames.get(sku) ?? sku

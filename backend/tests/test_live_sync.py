@@ -174,6 +174,17 @@ class LiveSyncTests(unittest.TestCase):
         self.sync.tick()
         self.assertEqual(self.fake.published, [])
 
+    def test_a_batch_names_everyone_who_changed_the_cart(self) -> None:
+        item = f"{self.root}/carts/{self.cart['id']}/items/milk"
+        self.client.patch(item, headers=self.member, json={"delta": 2})
+        self.client.patch(item, headers=self.primary, json={"delta": 1})
+        self.sync.tick()
+        snapshot = self.published_snapshot()
+        self.assertEqual(snapshot["cart_actors"][self.cart["id"]], [self.member_id, self.primary_id])
+        view = live_view(SimpleNamespace(app=app), self.household_id, Identity(self.child_id, False),
+                         self.cart["id"], snapshot)
+        self.assertEqual(view["actor_ids"], [self.member_id, self.primary_id])
+
     def test_in_memory_view_matches_the_database_view(self) -> None:
         adults_only = self.client.post(f"{self.root}/carts", headers=self.primary, json={
             "name": "Party", "adults_only": True,
