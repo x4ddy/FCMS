@@ -615,6 +615,19 @@ function App() {
   // or the socket handler keeps writing to the old view until a page reload.
   }, [token, household?.id, liveCartId, cartId])
 
+  // Always follow a cart that still exists. If the cart being shopped is deleted
+  // or access to it is removed, fall back to the household's regular shared cart.
+  // Without this the live connection follows no cart: edits still save, but the
+  // screen stops showing other members' items and their notifications.
+  useEffect(() => {
+    if (!household || carts.length === 0) return
+    if (carts.some((cart) => cart.id === shoppingCartId)) return
+    const fallback = carts.find((cart) => !cart.adults_only) ?? carts[0]
+    // Changing the followed cart reconnects the live socket, whose first
+    // message carries that cart's current contents.
+    setShoppingCartId(fallback.id)
+  }, [household?.id, carts, shoppingCartId])
+
   useEffect(() => {
     function handlePopState() {
       setOrderId(orderFromLocation())
