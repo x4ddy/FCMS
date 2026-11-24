@@ -80,6 +80,10 @@ export async function signInWithGoogle(credential) {
   return session
 }
 
+export function googleConfiguration() {
+  return request(`${api}/auth/google/config`)
+}
+
 export async function logoutSession(token) {
   try {
     await request(`${api}/sessions/logout`, { token, method: 'POST', retry: false })
@@ -99,6 +103,11 @@ export function accountApi(token) {
       token, method: 'POST', body: { invitation_code: invitationCode, display_name: displayName },
     }),
     personalCart: () => request(`${api}/personal-cart`, { token }),
+    addresses: () => request(`${api}/addresses`, { token }),
+    createAddress: (address) => request(`${api}/addresses`, { token, method: 'POST', body: address }),
+    deleteAddress: (id) => request(`${api}/addresses/${encodeURIComponent(id)}`, {
+      token, method: 'DELETE',
+    }),
     adjustPersonalItem: (sku, delta) => request(`${api}/personal-cart/items/${encodeURIComponent(sku)}`, {
       token, method: 'PATCH', body: { delta },
     }),
@@ -119,6 +128,9 @@ export function householdApi(token, householdId) {
     cart: (id) => request(cartPath(id), { token }),
     deleteCart: (id) => request(cartPath(id), { token, method: 'DELETE' }),
     members: () => request(`${household}/members?include_roles=true`, { token }),
+    transferHouseholdOwnership: (memberId) => request(
+      `${household}/members/${encodeURIComponent(memberId)}/primary`, { token, method: 'PUT' },
+    ),
     revokeMember: (id) => request(`${household}/members/${encodeURIComponent(id)}`, { token, method: 'DELETE' }),
     createInvitation: () => request(`${household}/invitations`, { token, method: 'POST' }),
     addresses: () => request(`${household}/addresses`, { token }),

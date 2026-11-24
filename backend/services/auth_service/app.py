@@ -21,6 +21,10 @@ class GoogleLoginRequest(BaseModel):
     credential: str = Field(min_length=100, max_length=8192)
 
 
+class GoogleConfiguration(BaseModel):
+    client_id: str
+
+
 class SignedInUser(BaseModel):
     id: str
     display_name: str
@@ -44,6 +48,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="FamilyCart Auth", lifespan=lifespan)
+
+
+@app.get(f"{API_PREFIX}/auth/google/config", response_model=GoogleConfiguration)
+def google_configuration(request: Request) -> GoogleConfiguration:
+    # OAuth client IDs are public identifiers. Returning the backend's configured
+    # value guarantees the browser and token verifier use the same audience.
+    return GoogleConfiguration(client_id=request.app.state.google_client_id)
 
 
 @app.post(f"{API_PREFIX}/auth/google")

@@ -42,18 +42,20 @@ class CartSync:
     def channel(self, household_id: str) -> str:
         return f"{self.namespace}:household:{household_id}"
 
-    def stage(self, after: int) -> tuple[int, dict[str, set[str]]]:
+    def stage(self, after: int) -> tuple[int, dict[str, dict[str, str | None]]]:
         with transaction(self.db_path) as db:
             events = db.execute(
-                "SELECT id, household_id, cart_id FROM cart_sync_events WHERE id > ? ORDER BY id",
+                "SELECT id, household_id, cart_id, actor_id FROM cart_sync_events WHERE id > ? ORDER BY id",
                 (after,),
             ).fetchall()
             if not events:
                 return after, {}
-            carts_by_household = defaultdict(set)
+            carts_by_household = defaultdict(dict)
             staged = {}
             for event in events:
-                carts_by_household[event["household_id"]].add(event["cart_id"])
+                # Events are ordered, so this keeps the actor responsible for
+                # the most recent visible change to each cart in this batch.
+                carts_by_household[event["household_id"]][event["cart_id"]] = event["actor_id"]
             for cart_ids in carts_by_household.values():
                 for cart_id in cart_ids:
                     staged[cart_id] = json.dumps(load_contributions(db, cart_id))
@@ -65,15 +67,15 @@ class CartSync:
         cutoff, households = self.stage(after=0)
         if not households:
             return
-        cart_ids = [cart_id for ids in households.values() for cart_id in ids]
+        cart_ids = [cart_id for carts in households.values() for cart_id in carts]
         snapshots = dict(zip(cart_ids, self.redis.hmget(self.stash, cart_ids), strict=True))
         if any(snapshot is None for snapshot in snapshots.values()):
             return
         with self.redis.pipeline(transaction=True) as batch:
-            for household_id, ids in households.items():
+            for household_id, actors in households.items():
                 payload = {"revision": cutoff, "carts": {
-                    cart_id: json.loads(snapshots[cart_id]) for cart_id in ids
-                }}
+                    cart_id: json.loads(snapshots[cart_id]) for cart_id in actors
+                }, "actors": actors}
                 batch.publish(self.channel(household_id), json.dumps(payload))
             batch.hdel(self.stash, *cart_ids)
             batch.execute()

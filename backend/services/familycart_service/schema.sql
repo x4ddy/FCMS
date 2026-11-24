@@ -75,6 +75,22 @@ CREATE TABLE IF NOT EXISTS household_addresses (
 CREATE INDEX IF NOT EXISTS household_addresses_household_idx
     ON household_addresses (household_id, created_at);
 
+CREATE TABLE IF NOT EXISTS user_addresses (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    recipient_name TEXT NOT NULL,
+    address_line1 TEXT NOT NULL,
+    address_line2 TEXT,
+    city TEXT NOT NULL,
+    postal_code TEXT,
+    phone TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS user_addresses_user_idx ON user_addresses (user_id, created_at);
+
 CREATE TABLE IF NOT EXISTS personal_carts (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL UNIQUE,
@@ -124,5 +140,6 @@ CREATE TABLE IF NOT EXISTS cart_sync_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     household_id TEXT NOT NULL,
     cart_id TEXT NOT NULL,
+    actor_id TEXT,
     FOREIGN KEY (household_id, cart_id) REFERENCES carts (household_id, id)
 );

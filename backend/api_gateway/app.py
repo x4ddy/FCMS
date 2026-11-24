@@ -53,6 +53,8 @@ def _target_for(path: str, app: FastAPI) -> str:
         or path.startswith("household-invitations/")
         or path == "personal-cart"
         or path.startswith("personal-cart/")
+        or path == "addresses"
+        or path.startswith("addresses/")
         or path == "products"
         or path.startswith("products/")
     ):

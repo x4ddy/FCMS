@@ -1,9 +1,14 @@
 import os
+import logging
 from dataclasses import dataclass
 
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
+
+
+LOGGER = logging.getLogger(__name__)
+GOOGLE_CLOCK_SKEW_SECONDS = 10
 
 
 class InvalidGoogleCredential(ValueError):
@@ -33,8 +38,10 @@ def verify_google_credential(credential: str, client_id: str) -> GoogleIdentity:
             credential,
             google_requests.Request(),
             client_id,
+            clock_skew_in_seconds=GOOGLE_CLOCK_SKEW_SECONDS,
         )
-    except (GoogleAuthError, ValueError):
+    except (GoogleAuthError, ValueError) as error:
+        LOGGER.warning("Google ID token verification failed: %s", error)
         raise InvalidGoogleCredential("Google sign-in could not be verified") from None
 
     subject = str(claims.get("sub", "")).strip()

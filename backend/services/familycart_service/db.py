@@ -21,10 +21,15 @@ def initialize_database(path: DatabaseTarget) -> None:
     with closing(connect_database(path)) as db:
         if db.dialect == "sqlite":
             db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\nCOMMIT;")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(cart_sync_events)")}
+            if "actor_id" not in columns:
+                db.execute("ALTER TABLE cart_sync_events ADD COLUMN actor_id TEXT")
+            db.commit()
         else:
             db.execute("BEGIN")
             try:
                 db.execute_script(schema)
+                db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS actor_id TEXT")
                 db.execute_script(seed)
             except Exception:
                 db.rollback()
@@ -56,6 +61,18 @@ def active_member(
         FROM household_members AS members
         JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
         WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
+        """,
+        (household_id, user_id),
+    ).fetchone()
+
+
+def household_member(db: DatabaseConnection, household_id: str, user_id: str):
+    return db.execute(
+        """
+        SELECT members.role, members.active, profiles.created_by AS owner_id
+        FROM household_members AS members
+        JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
+        WHERE members.household_id = ? AND members.user_id = ?
         """,
         (household_id, user_id),
     ).fetchone()

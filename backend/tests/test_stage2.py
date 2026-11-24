@@ -84,8 +84,13 @@ class StageTwoTests(unittest.TestCase):
         for _ in range(2):
             revoke = self.cart.delete(CHILD_GRANT, headers=self.primary)
             self.assertEqual((revoke.status_code, revoke.content), (204, b""))
-        self.assertEqual(self.set_milk(REGULAR, self.child, 9).status_code, 404)
-        self.assertEqual(self.cart.get(REGULAR, headers=self.child).status_code, 404)
+        denied = self.set_milk(REGULAR, self.child, 9)
+        self.assertEqual(denied.status_code, 403)
+        self.assertEqual(
+            denied.json()["detail"],
+            "You no longer have access to this cart. Contact Primary Customer, the primary account holder.",
+        )
+        self.assertEqual(self.cart.get(REGULAR, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.get(CARTS, headers=self.child).json(), [])
         self.assertEqual(self.cart.get(REGULAR, headers=self.primary).json()["contributions"], expected)
         self.assertEqual(self.set_milk(REGULAR, self.primary, 0).json()["quantity"], 0)
@@ -135,17 +140,21 @@ class StageTwoTests(unittest.TestCase):
             ["user-adult"],
         )
         self.assertEqual(self.cart.get(CARTS, headers=self.child).json(), [])
-        self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 404)
-        self.assertEqual(self.set_milk(cart, self.child, 9).status_code, 404)
+        self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 403)
+        self.assertEqual(self.set_milk(cart, self.child, 9).status_code, 403)
         view = live_view(
             SimpleNamespace(app=familycart_app), "demo-household", CHILD.identity, cart_id,
             {"revision": edit["revision"], "carts": {cart_id: [edit]}},
         )
         self.assertEqual(view["carts"], [])
         self.assertIsNone(view["cart"])
+        self.assertEqual(
+            view["access_notice"],
+            "You no longer have access to this cart. Contact Primary Customer, the primary account holder.",
+        )
 
         initialize_database(self.db_path)
-        self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 404)
+        self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.get(cart, headers=self.primary).json()["contributions"][0]["quantity"], 2)
         self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 204)
         self.assertEqual(
@@ -201,7 +210,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
         with closing(sqlite3.connect(self.db_path)) as db, db:
             db.execute("UPDATE household_members SET active = 0 WHERE user_id = 'user-child'")
-        self.assertEqual(self.set_milk(REGULAR, self.child, 1).status_code, 404)
+        self.assertEqual(self.set_milk(REGULAR, self.child, 1).status_code, 403)
         self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 404)
         for quantity in (-1, 1.5, 1.0, True, "2", 2**63):
             with self.subTest(quantity=quantity):
@@ -244,21 +253,25 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(removed.json()["quantity"], 0)
         self.assertEqual(self.cart.get(REGULAR, headers=self.child).json()["contributions"], [])
 
-    def test_household_creator_is_the_permanent_primary(self) -> None:
+    def test_household_ownership_can_be_transferred_and_persists(self) -> None:
         adult = self.sign_in("adult@example.test", "adult-demo-2026")
         members = f"{HOUSEHOLD}/members"
         promote = f"{members}/user-adult/primary"
         self.assertEqual(self.cart.get(CARTS, headers=adult).json(), [])
         self.assertEqual(self.cart.put(promote, headers=adult).status_code, 403)
-        self.assertEqual(self.cart.put(f"{members}/user-child/primary", headers=self.primary).status_code, 409)
-        self.assertEqual(self.cart.put(f"{members}/missing/primary", headers=self.primary).status_code, 409)
-        self.assertEqual(self.cart.put(promote, headers=self.primary).status_code, 409)
+        self.assertEqual(self.cart.put(f"{members}/missing/primary", headers=self.primary).status_code, 404)
+        transferred = self.cart.put(promote, headers=self.primary)
+        self.assertEqual(transferred.status_code, 200)
+        self.assertEqual(transferred.json()["role"], "primary")
+        self.assertEqual(self.cart.get(members, headers=self.primary).status_code, 403)
+        self.assertEqual(self.cart.get(ADULTS_ONLY, headers=adult).status_code, 200)
+        self.assertTrue(self.cart.get(f"{HOUSEHOLD}/capabilities", headers=adult).json()["can_create_adults_only_cart"])
         initialize_database(self.db_path)
-        self.assertEqual(self.cart.put(promote, headers=self.primary).status_code, 409)
-        self.assertEqual(self.cart.get(ADULTS_ONLY, headers=adult).status_code, 404)
-        self.assertFalse(self.cart.get(f"{HOUSEHOLD}/capabilities", headers=adult).json()["can_create_adults_only_cart"])
-        listed = self.cart.get(f"{members}?include_roles=true", headers=self.primary).json()
-        self.assertIn({"id": "user-adult", "display_name": "Demo Adult", "role": "member", "is_adult": True}, listed)
+        listed = self.cart.get(f"{members}?include_roles=true", headers=adult).json()
+        self.assertIn({"id": "user-adult", "display_name": "Demo Adult", "role": "primary", "is_adult": True}, listed)
+        restored = self.cart.put(f"{members}/user-primary/primary", headers=adult)
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(self.cart.get(f"{members}?include_roles=true", headers=self.primary).status_code, 200)
 
     def test_cart_deletion_requires_primary_or_creator_and_survives_restart(self) -> None:
         self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
@@ -270,7 +283,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 204)
         self.assertEqual(self.set_milk(own_cart, self.child, 4).status_code, 200)
         self.assertEqual(self.cart.delete(own_grant, headers=self.primary).status_code, 204)
-        self.assertEqual(self.cart.delete(own_cart, headers=self.child).status_code, 404)
+        self.assertEqual(self.cart.delete(own_cart, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 204)
         self.assertFalse(self.cart.get(own_cart, headers=self.child).json()["can_delete_cart"])
         self.assertEqual(self.cart.delete(own_cart, headers=self.child).status_code, 403)

@@ -122,4 +122,4 @@ class FirstSliceTests(unittest.TestCase):
                 "UPDATE household_members SET active = 0 WHERE household_id = ? AND user_id = ?",
                 ("demo-household", "user-primary"),
             )
-        self.assertEqual(self.familycart.get(CARTS_URL, headers=headers).status_code, 404)
+        self.assertEqual(self.familycart.get(CARTS_URL, headers=headers).status_code, 403)

@@ -129,7 +129,8 @@ export function CartDetail({
           <section className="panel">
             <h2>Cart access</h2>
             <ul className="rows">
-              {members.filter((member) => member.role !== 'primary' && (!cart.adults_only || member.is_adult)).map((member) => {
+              {members.filter((member) => member.role !== 'primary'
+                && (!cart.adults_only || member.is_adult)).map((member) => {
                 const granted = grants.includes(member.id)
                 return (
                   <li key={member.id}>

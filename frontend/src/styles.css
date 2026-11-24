@@ -162,6 +162,8 @@ main { padding-block: 2.75rem; }
 .cart-activity-notice button { min-width: 2rem; min-height: 2rem; padding: 0; border: 0; background: transparent;
   color: #3d6846; font-size: 1.3rem; }
 .cart-activity-notice button:hover:enabled { background: #e1f2df; }
+.cart-activity-notice.error { border-color: #e2aea5; background: #fff4f1; color: #7e2e22; }
+.cart-activity-notice.error button { color: #7e2e22; }
 
 .grocery-page { display: grid; gap: 2.25rem; }
 .shop-toolbar { position: sticky; top: 0; z-index: 5; display: grid; grid-template-columns: minmax(14rem, 1fr) auto auto;
@@ -223,6 +225,9 @@ main { padding-block: 2.75rem; }
 
 .household-dashboard { display: grid; gap: 1.25rem; }
 .household-dashboard .page-heading h1 { margin-top: .35rem; }
+.household-switcher { display: grid; gap: .35rem; max-width: 22rem; margin-top: .8rem;
+  color: var(--muted); font-size: .82rem; }
+.household-switcher select { background: #fff; }
 .role-badge { padding: .4rem .75rem; border-radius: 2rem; background: #e4f2e3; color: #1d712d;
   font-size: .82rem; font-weight: 750; text-transform: capitalize; }
 .setup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; max-width: 64rem; }
@@ -230,6 +235,9 @@ main { padding-block: 2.75rem; }
 .setup-grid label input, .address-form label input { margin-top: .4rem; }
 .dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
 .dashboard-addresses { grid-column: 1 / -1; }
+.household-more { grid-column: 1 / -1; }
+.household-more summary { cursor: pointer; color: #15752a; font-weight: 750; }
+.household-more[open] summary { margin-bottom: 1rem; }
 .invite-code { display: grid; grid-template-columns: 1fr auto; gap: .5rem; margin: 1rem 0; padding: .8rem;
   border-radius: .7rem; background: #f1f8ef; }
 .invite-code small { grid-column: 1 / -1; }
