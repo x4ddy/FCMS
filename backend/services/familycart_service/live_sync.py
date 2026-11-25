@@ -27,6 +27,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
@@ -44,6 +45,9 @@ SYNC_ERRORS = (RedisError,) + database_error_types()
 # Lists edited this long before the previous batch are looked at again, so a
 # transaction that was still committing while that batch ran is never missed.
 LIST_OVERLAP = timedelta(seconds=5)
+
+
+HOUSEHOLD_DELETED = "This household was deleted by its admin."
 
 
 def sync_interval() -> float:
@@ -128,9 +132,9 @@ def build_snapshots(
     ):
         snapshot = snapshots.setdefault(row["household_id"], {
             "household_id": row["household_id"], "owner_id": row["owner_id"],
-            "owner_name": "the primary account holder", "revision": None, "members": [],
+            "owner_name": "the household admin", "revision": None, "members": [],
             "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "ordered": {}, "lists": [],
-            "addresses": [],
+            "addresses": [], "checkouts": {}, "waiting": {}, "member_requests": [],
         })
         fixture = MEMBERS_BY_ID.get(row["user_id"])
         fixture_adult = bool(fixture and fixture.identity.is_adult)
@@ -163,7 +167,7 @@ def build_snapshots(
     carts_by_id = {}
     for row in db.execute(
         f"""SELECT carts.household_id, carts.id, carts.name, carts.creator_id, carts.adults_only,
-                   deleted_carts.cart_id IS NOT NULL AS deleted,
+                   deleted_carts.cart_id IS NOT NULL AS deleted, deleted_carts.next_cart_id,
                    cart_creator_revocations.cart_id IS NOT NULL AS creator_revoked
             FROM carts
             LEFT JOIN deleted_carts ON deleted_carts.cart_id = carts.id
@@ -174,7 +178,7 @@ def build_snapshots(
         cart = {
             "id": row["id"], "name": row["name"], "creator_id": row["creator_id"],
             "adults_only": bool(row["adults_only"]), "deleted": bool(row["deleted"]),
-            "creator_revoked": bool(row["creator_revoked"]), "grants": [],
+            "creator_revoked": bool(row["creator_revoked"]), "next_cart_id": row["next_cart_id"], "grants": [],
         }
         carts_by_id[row["id"]] = cart
         snapshots[row["household_id"]]["carts"].append(cart)
@@ -185,6 +189,33 @@ def build_snapshots(
     ):
         if row["cart_id"] in carts_by_id:
             carts_by_id[row["cart_id"]]["grants"].append(row["member_id"])
+
+    # One query for three small things: who is checking out, what waits for the next cart, and requests to add members.
+    for row in db.execute(
+        f"""SELECT 'checkout' AS kind, household_id, cart_id AS id, user_id AS person, expires_at AS text_a,
+                   NULL AS text_b, NULL AS status, NULL AS quantity
+            FROM checkout_sessions WHERE household_id IN ({marks})
+            UNION ALL
+            SELECT 'waiting', household_id, cart_id, contributor_id, sku, NULL, NULL, quantity
+            FROM cart_waiting_items WHERE household_id IN ({marks})
+            UNION ALL
+            SELECT 'request', household_id, id, requested_by, name, note, status, NULL
+            FROM member_requests WHERE household_id IN ({marks}) AND status IN ('PENDING', 'APPROVED')
+            ORDER BY 1, 2, 3, 5, 4""",
+        [*present, *present, *present],
+    ):
+        snapshot = snapshots[row["household_id"]]
+        if row["kind"] == "checkout":
+            snapshot["checkouts"][row["id"]] = {"user_id": row["person"], "expires_at": row["text_a"]}
+        elif row["kind"] == "waiting":
+            snapshot["waiting"].setdefault(row["id"], []).append({
+                "sku": row["text_a"], "contributor_id": row["person"], "quantity": row["quantity"],
+            })
+        else:
+            snapshot["member_requests"].append({
+                "id": row["id"], "requested_by": row["person"], "name": row["text_a"], "note": row["text_b"],
+                "status": row["status"],
+            })
 
     event_ids: list[int] = []
     changed: dict[str, set[str]] = defaultdict(set)
@@ -284,8 +315,10 @@ def viewer_role(snapshot: dict, user_id: str) -> bool:
     if member is None:
         raise AccessEnded("Household not found")
     if not member["active"]:
+        if any(other["id"] == snapshot["owner_id"] and not other["active"] for other in snapshot["members"]):
+            raise AccessEnded(HOUSEHOLD_DELETED)  # an admin always stays active otherwise
         raise AccessEnded(
-            f"Your household access was revoked. Contact {snapshot['owner_name']}, the primary account holder."
+            f"Your household access was revoked. Contact {snapshot['owner_name']}, the household admin."
         )
     return snapshot["owner_id"] == user_id
 
@@ -309,6 +342,8 @@ class LiveSync:
         self.subscriber = AsyncRedis.from_url(redis_url, **options)
         self.async_cache = AsyncRedis.from_url(cache_url, **options)
         self.breaker = Breaker("live-sync")
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wake = asyncio.Event()
         self._marker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dirty")
         self._force_sweep = True  # catch up on anything left from before a restart
         self._last_sweep_at: str | None = None
@@ -344,6 +379,20 @@ class LiveSync:
                 self._force_sweep = True
 
         self._marker.submit(write)
+
+    def publish_now(self) -> None:
+        """Send the next batch straight away. Used when somebody starts, leaves or finishes checkout.
+
+        Queued behind the note of the change itself, so that note is included.
+        """
+        def wake() -> None:
+            if self._loop is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._wake.set)
+
+        try:
+            self._marker.submit(wake)
+        except RuntimeError:
+            pass  # shutting down
 
     async def mark_online(self, household_id: str) -> None:
         """Called by open sockets; the key expires on its own when nobody refreshes it."""
@@ -500,8 +549,11 @@ class LiveSync:
 
     async def run(self) -> None:
         failed = False
+        self._loop = asyncio.get_running_loop()
         while True:
-            await asyncio.sleep(self.interval)
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), self.interval)
+            self._wake.clear()
             try:
                 await asyncio.to_thread(self.tick)
                 failed = False
@@ -509,6 +561,7 @@ class LiveSync:
                 if not failed:
                     logger.warning("Live updates will retry: %s", error)
                 failed = True
+            await asyncio.sleep(min(0.5, self.interval))  # several requests to publish become one batch
 
     async def close(self) -> None:
         global _listener

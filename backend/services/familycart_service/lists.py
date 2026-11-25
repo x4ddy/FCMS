@@ -28,8 +28,9 @@ from backend.shared.tokens import Identity, verify_token
 
 from .app import (
     MAX_QUANTITY, Caller, CartResponse, household_access, record_cart_change, require_product_for_cart,
-    require_visible_cart, viewer_age, visible_product,
+    change_waiting, require_visible_cart, shared_quantity, viewer_age, visible_product,
 )
+from . import checkout_session
 from .db import ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, contribution_quantity, set_contribution
 from .live_sync import AccessEnded, notify_changed, viewer_role
 
@@ -277,7 +278,7 @@ def get_list(household_id: str, list_id: str, request: Request, caller: Caller) 
 def require_list_manager(row, caller: Identity, is_primary: bool) -> None:
     if not is_primary and row["created_by"] != caller.user_id:
         raise HTTPException(
-            status_code=403, detail="Only the list creator or the household primary can change this list",
+            status_code=403, detail="Only the list creator or the household admin can change this list",
         )
 
 
@@ -518,6 +519,7 @@ def add_rows_to_cart(
     """
     moved: list[str] = []
     skipped: list[SkippedItem] = []
+    session = checkout_session.current_session(db, household_id, cart.id) if cart is not None else None
     for item_id in dict.fromkeys(item_ids):
         row = db.execute(find, (list_id, item_id)).fetchone()
         if row is None or not item_visible(request, caller, row["sku"]):
@@ -532,16 +534,24 @@ def add_rows_to_cart(
                 add_to_personal_cart(db, caller.user_id, row["sku"], row["quantity"], now)
             else:
                 require_product_for_cart(request, row["sku"], caller, cart)
-                current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
-                set_contribution(
-                    db, household_id, cart.id, row["sku"], caller.user_id,
-                    min(MAX_QUANTITY, current + row["quantity"]),
-                )
+                if session is not None:
+                    in_cart = shared_quantity(db, cart.id, row["sku"])
+                    change_waiting(
+                        db, household_id, cart.id, row["sku"], row["quantity"], caller, False, session, in_cart=in_cart,
+                    )
+                else:
+                    current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
+                    set_contribution(
+                        db, household_id, cart.id, row["sku"], caller.user_id,
+                        min(MAX_QUANTITY, current + row["quantity"]),
+                    )
         except HTTPException as error:
             skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
             continue
         moved.append(item_id)
-    if moved and cart is not None:
+    if moved and session is not None:
+        checkout_session.record_waiting_change(db, household_id, cart.id, caller.user_id)
+    elif moved and cart is not None:
         record_cart_change(db, household_id, cart.id, caller.user_id)
     return MoveResult(moved=moved, skipped=skipped)
 
@@ -554,7 +564,7 @@ def move_to_cart(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_list(db, household_id, list_id)
         cart = None if body.target == "personal" else require_visible_cart(
-            db, household_id, body.target, caller, is_primary,
+            db, household_id, checkout_session.open_cart_id(db, body.target), caller, is_primary,
         )
         result = add_rows_to_cart(
             db, request, household_id, cart, caller, body.item_ids, now,

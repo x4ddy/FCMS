@@ -1,17 +1,13 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
+import { Avatar, confirmAction, Icon, ProductImage } from './ui.jsx'
 import {
-  applyChanges, avatarHue, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, initials, mergeListUpdate, parsePastedList, parseQuickAdd,
+  applyChanges, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, mergeListUpdate, parsePastedList, parseQuickAdd,
   productSuggestions, queueAdd, queueRemove, queueSet, timeAgo, upsertListSummary,
 } from './listState.js'
 
 const money = new Intl.NumberFormat('en-AE', { style: 'currency', currency: 'AED' })
 const LIST_IDEAS = ['Weekly groceries', 'Weekend BBQ', 'Pharmacy run', 'School lunches']
-
-function Avatar({ id, name, size = 'small' }) {
-  return <span className={`avatar ${size}`} title={name} aria-label={name}
-    style={{ '--hue': avatarHue(id) }}>{initials(name)}</span>
-}
 
 function ProgressBar({ done, total }) {
   const percent = total === 0 ? 0 : Math.round(done / total * 100)
@@ -98,7 +94,7 @@ function PastePreview({ rows, onChange, onConfirm, onCancel }) {
       <ul>
         {rows.map((row, index) => (
           <li key={index}>
-            {row.product ? <img src={row.product.image_url} alt="" /> : <span className="custom-icon" aria-hidden="true">✎</span>}
+            {row.product ? <ProductImage product={row.product} /> : <span className="custom-icon" aria-hidden="true">✎</span>}
             <span><strong>{row.quantity > 1 && `${row.quantity} × `}{row.product?.name ?? row.text}</strong>
               <small>{row.product ? row.product.category : 'Note'}</small></span>
             <button type="button" className="icon-button" aria-label={`Skip ${row.text}`}
@@ -152,7 +148,7 @@ function QuickAdd({ products, busy, onAddProduct, onAddCustom, onAddMany }) {
       if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
     }}>
       <div className="quick-add-field">
-        <span aria-hidden="true">＋</span>
+        <Icon name="plus" size={22} />
         <input ref={inputRef} role="combobox" aria-expanded={showMenu} aria-controls={listboxId}
           aria-autocomplete="list" aria-label="Add an item"
           aria-activedescendant={active >= 0 ? `${listboxId}-${active}` : undefined}
@@ -178,7 +174,7 @@ function QuickAdd({ products, busy, onAddProduct, onAddCustom, onAddMany }) {
             className={index === active ? 'active' : ''}
             onMouseEnter={() => setActive(index)}
             onMouseDown={(event) => { event.preventDefault(); submit(index) }}>
-            <img src={product.image_url} alt="" loading="lazy" />
+            <ProductImage product={product} />
             <span><strong>{product.name}</strong><small>{product.category}</small></span>
             <em>{quantity > 1 && `${quantity} × `}{money.format(product.price_fils / 100)}</em>
           </li>
@@ -218,7 +214,7 @@ function ListItemRow({ item, product, chosen, onChoose, onToggle, onQuantity, on
           aria-label={item.checked ? `Put ${label} back on the list` : `Select ${label} for the cart`} />
         <span aria-hidden="true" />
       </label> : <span className="list-check-space" aria-hidden="true" />}
-      {product ? <img src={product.image_url} alt="" loading="lazy" />
+      {product ? <ProductImage product={product} />
         : <span className="list-item-placeholder" aria-hidden="true">✎</span>}
       <div className="list-item-body">
         <strong>{label}</strong>
@@ -318,8 +314,10 @@ function ListDetail({
                 onClick={() => setRenaming(true)}>✎</button>}
             </h1>
           )}
-          {list.can_manage && <button className="secondary danger" disabled={busy} onClick={() => {
-            if (window.confirm(`Delete “${list.name}” and all ${list.items.length} items? This can’t be undone.`)) onDelete()
+          {list.can_manage && <button className="secondary danger" disabled={busy} onClick={async () => {
+            if (await confirmAction({
+              title: `Delete “${list.name}”?`, text: `All ${list.items.length} items go with it. This can’t be undone.`, action: 'Delete list', danger: true,
+            })) onDelete()
           }}>Delete list</button>}
         </div>
         <p className="muted">
@@ -407,7 +405,7 @@ export function ListsPage({ account, api, household, onBack, ...rest }) {
   const shared = tab === 'household' && household
   const tabs = [['mine', 'My lists'], ['household', 'Household lists']]
   return (
-    <div className="shopping-lists-page">
+    <div className="shopping-lists-page page">
       <div className="list-tabs" role="tablist" aria-label="Which lists">
         {tabs.map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>)}
       </div>
@@ -657,7 +655,6 @@ function ShoppingLists({
     <section className="shopping-lists">
       {!openId && <div className="page-heading">
         <div>
-          <button className="text-button" onClick={onBack}>← Back to groceries</button>
           <h1>{mine ? 'My lists' : 'Household lists'}</h1>
           <p className="muted">{mine ? 'Private. Only you can see these.' : `Shared with everyone in ${household.name}.`}</p>
         </div>

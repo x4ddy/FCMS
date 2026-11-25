@@ -39,6 +39,7 @@ def initialize_database(path: DatabaseTarget) -> None:
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
                 # People who were members before age approval existed keep the access they had.
+                add_sqlite_columns(db, "deleted_carts", {"next_cart_id": "TEXT"})
                 add_sqlite_columns(db, "household_member_profiles", {"age_status": "TEXT NOT NULL DEFAULT 'APPROVED'"})
         else:
             db.execute("BEGIN")
@@ -50,6 +51,7 @@ def initialize_database(path: DatabaseTarget) -> None:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
                         ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION""")
+                db.execute("ALTER TABLE deleted_carts ADD COLUMN IF NOT EXISTS next_cart_id TEXT")
                 db.execute("""ALTER TABLE household_member_profiles
                     ADD COLUMN IF NOT EXISTS age_status TEXT NOT NULL DEFAULT 'APPROVED'""")
                 db.execute_script(seed)

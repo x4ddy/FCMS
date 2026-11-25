@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { Empty, Icon, money } from './ui.jsx'
 
 const placedDate = new Intl.DateTimeFormat('en-AE', { dateStyle: 'medium', timeStyle: 'short' })
-const money = new Intl.NumberFormat('en-AE', { style: 'currency', currency: 'AED' })
 
-export function OrderHistory({ account, onOpen }) {
+export function OrderHistory({ account, onOpen, onShop }) {
   const [orders, setOrders] = useState([])
   const [next, setNext] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -41,29 +41,32 @@ export function OrderHistory({ account, onOpen }) {
     }
   }, [])
 
-  return <section className="checkout-page">
+  return <section className="page narrow">
     <h1>Order history</h1>
+    <p className="muted">Orders you placed, including split deliveries.</p>
     {orders.length > 0 && <ul className="order-history-list">
       {orders.map((order) => <li key={order.order_id}>
         <button className="panel order-history-row" aria-label={`View order ${order.order_number}`}
           onClick={() => onOpen(order.order_id)}>
+          <Icon name="orders" size={26} />
           <span className="order-history-main">
             <strong>{order.order_number}</strong>
             <time dateTime={order.placed_at}>{placedDate.format(new Date(order.placed_at))}</time>
-            <span>{order.is_shared ? 'Shared order' : 'Personal order'} · {order.delivery_count}{' '}
+            <span className="muted">{order.is_shared ? 'Shared order' : 'Personal order'} · {order.delivery_count}{' '}
               {order.delivery_count === 1 ? 'delivery' : 'deliveries'}</span>
           </span>
           <span className="order-history-total">
-            <strong>{money.format(order.total_fils / 100)}</strong>
+            <strong>{money(order.total_fils)}</strong>
             <span className="tag">{order.status === 'PLACED' ? 'Placed' : order.status}</span>
           </span>
         </button>
       </li>)}
     </ul>}
     {error && <p role="alert" className="notice error">{error}</p>}
-    {loading ? <p role="status">Loading orders.</p> : error ?
+    {loading ? <div role="status" aria-label="Loading orders">{[0, 1, 2].map((key) => <div className="panel skeleton order-skeleton" key={key} />)}</div> : error ?
       <button className="secondary order-history-more" onClick={() => load(next)}>Try again</button> : next ?
         <button className="secondary order-history-more" onClick={() => load(next)}>Load more orders</button> :
-        !orders.length && <p className="empty">You haven’t placed any orders yet.</p>}
+        !orders.length && <Empty icon="📦" title="No orders yet">
+          <p>You haven’t placed any orders yet.</p><button onClick={onShop}>Start shopping</button></Empty>}
   </section>
 }

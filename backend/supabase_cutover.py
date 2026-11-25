@@ -27,13 +27,14 @@ STORES = {
         ("households household_members household_profiles household_member_profiles carts "
          "household_invitations household_addresses user_addresses personal_carts personal_cart_items "
          "cart_grants cart_creator_revocations deleted_carts cart_item_contributions cart_sync_events "
-         "shopping_lists shopping_list_items personal_lists personal_list_items store_inventory checkout_cart_revisions checkout_quotes "
-         "orders order_delivery_groups order_lines").split(),
+         "shopping_lists shopping_list_items personal_lists personal_list_items member_requests store_inventory checkout_cart_revisions checkout_quotes "
+         "orders order_delivery_groups order_lines checkout_sessions cart_waiting_items").split(),
     ),
 }
 
 # Columns added after the baseline. Missing ones mean a migration has not been applied.
-ADDED_COLUMNS = {"household_member_profiles": ["age_status"], "cart_sync_events": ["reason"]}
+ADDED_COLUMNS = {"household_member_profiles": ["age_status"], "cart_sync_events": ["reason"],
+                 "deleted_carts": ["next_cart_id"]}
 # Columns an unreleased build left in some local databases. Nothing reads them.
 RETIRED_COLUMNS = {"household_addresses": {"source_address_id"}}
 

@@ -46,6 +46,8 @@ class QuoteInput(CheckoutInput):
     cart: Annotated[PersonalCart | HouseholdCart, Field(discriminator="kind")]
     default_address: AddressRef
     overrides: list[AddressOverride] = Field(default_factory=list)
+    # Products to order. Everything else stays in the cart. None orders the whole cart.
+    skus: Annotated[list[ReferenceID], Field(min_length=1, max_length=500)] | None = None
 
 
 class OrderInput(CheckoutInput):
@@ -93,10 +95,14 @@ def cart_state(db, reference, caller):
     member = active_member(db, household_id, caller.user_id)
     if member is None:
         raise error(404, "CART_NOT_FOUND", "Cart not found.")
-    if member["owner_id"] != caller.user_id:
-        raise error(403, "CHECKOUT_FORBIDDEN", "Only the household primary can check out this cart.")
+    is_admin = member["owner_id"] == caller.user_id
+    if not is_admin and not caller.is_adult:
+        raise error(403, "CHECKOUT_FORBIDDEN", "Child users cannot check out.")
     cart = load_carts(db, household_id, caller.user_id, reference.cart_id).fetchone()
-    if cart is None:
+    granted = cart is not None and (is_admin or (
+        not cart["creator_revoked"] if cart["creator_id"] == caller.user_id else cart["has_grant"]
+    ))
+    if not granted:
         raise error(404, "CART_NOT_FOUND", "Cart not found.")
     names = {row["user_id"]: row["display_name"] for row in db.execute(
         "SELECT user_id, display_name FROM household_member_profiles WHERE household_id = ?", (household_id,),
@@ -111,12 +117,19 @@ def saved_address(db, reference, address, user_id: str, *, lock: bool) -> dict:
         ("user_addresses", "user_id", user_id) if address.kind == "personal" else
         ("household_addresses", "household_id", reference.household_id)
     )
+    parameters = [address.address_id, owner]
     row_lock = " FOR SHARE" if lock and db.dialect == "postgresql" else ""
     # An address leaves with the member who added it.
     active = f" AND {ACTIVE_ADDRESS}" if address.kind == "household" else ""
+    if address.kind == "household":
+        # Same rule as the address list: only the admin can use other members' addresses.
+        member = active_member(db, reference.household_id, user_id)
+        if member is None or member["owner_id"] != user_id:
+            active += " AND created_by = ?"
+            parameters.append(user_id)
     row = db.execute(
         f"SELECT {ADDRESS_FIELDS}, updated_at FROM {table} WHERE id = ? AND {ownership} = ?" + active + row_lock,
-        (address.address_id, owner),
+        parameters,
     ).fetchone()
     if row is None:
         raise error(404, "ADDRESS_NOT_FOUND", "Address not found.")
@@ -128,6 +141,11 @@ def snapshot(db, selection: QuoteInput, caller, products, *, lock: bool) -> dict
     cart, rows, names = cart_state(db, reference, caller)
     if not rows:
         raise error(409, "EMPTY_CART", "Add something to your cart before checkout.")
+    if selection.skus is not None:
+        chosen = set(selection.skus)
+        if chosen - {row["sku"] for row in rows}:
+            raise error(409, "SELECTION_CHANGED", "A selected item is no longer in the cart. Review your selection.")
+        rows = [row for row in rows if row["sku"] in chosen]
     contributors = {row.get("contributor_id") for row in rows}
     overrides = {}
     for override in selection.overrides:
@@ -344,7 +362,7 @@ def revalidate(db, reviewed_state, selection, caller, products, *, lock: bool) -
     try:
         state = snapshot(db, selection, caller, products, lock=lock)
     except HTTPException as issue:
-        if issue.detail["code"] in {"EMPTY_CART", "ADDRESS_NOT_FOUND", "ITEM_UNAVAILABLE", "INVALID_CONTRIBUTOR"}:
+        if issue.detail["code"] in {"EMPTY_CART", "SELECTION_CHANGED", "ADDRESS_NOT_FOUND", "ITEM_UNAVAILABLE", "INVALID_CONTRIBUTOR"}:
             raise stale() from None
         raise
     if state != reviewed_state:

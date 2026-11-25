@@ -38,9 +38,9 @@ _NORMAL = {
     "DELETE": (rf"{CART}/items/{S}", rf"{CART}/items/{S}/contributions/{S}", rf"{LIST}/items/{S}"),
 }
 _CRITICAL = {
-    "POST": ("checkout/orders", "auth/age"),
+    "POST": ("checkout/orders", "auth/age", rf"{H}/leave"),
     "PUT": (rf"{H}/members/{S}/primary", rf"{H}/members/{S}/age"),
-    "DELETE": (rf"{H}/members/{S}",),
+    "DELETE": (H, rf"{H}/members/{S}"),
 }
 
 

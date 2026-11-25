@@ -293,6 +293,8 @@ async def websocket_proxy(websocket: WebSocket, path: str) -> None:
         if is_ambiguous(path):
             raise ValueError
         identity = await _validate_access(websocket.app, token, Level.SENSITIVE)
+    except WebSocketDisconnect:
+        return  # the browser left before identifying itself
     except HTTPException as error:
         # 4401 makes the browser renew its token; 1013 means "try again later".
         await websocket.close(code=1013 if error.status_code == 503 else 4401)

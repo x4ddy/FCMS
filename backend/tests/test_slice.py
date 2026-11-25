@@ -70,6 +70,7 @@ class FirstSliceTests(unittest.TestCase):
                     "adults_only": True,
                     "can_edit_items": True,
                     "can_manage_access": True,
+                    "can_checkout": True,
                 },
                 {
                     "id": "regular-cart",
@@ -77,6 +78,7 @@ class FirstSliceTests(unittest.TestCase):
                     "adults_only": False,
                     "can_edit_items": True,
                     "can_manage_access": True,
+                    "can_checkout": True,
                 },
             ],
         )
@@ -123,4 +125,4 @@ class FirstSliceTests(unittest.TestCase):
                 "UPDATE household_members SET active = 0 WHERE household_id = ? AND user_id = ?",
                 ("demo-household", "user-primary"),
             )
-        self.assertEqual(self.familycart.get(CARTS_URL, headers=headers).status_code, 403)
+        self.assertEqual(self.familycart.get(CARTS_URL, headers=headers).status_code, 404)

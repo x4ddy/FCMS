@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from backend.shared.api import API_PREFIX
 from backend.shared.database import DatabaseConnection
 
+from . import checkout_session
 from .app import Caller, apply_account_age, household_access, require_visible_cart, visible_product
 from .db import transaction
 from .lists import (
@@ -255,7 +256,9 @@ def move_to_cart(list_id: str, body: MoveMyItems, request: Request, caller: Call
     now = now_iso()
     with household_access(request, body.household_id, caller, write=True) as (db, is_primary):
         require_my_list(db, list_id, caller)
-        cart = require_visible_cart(db, body.household_id, body.target, caller, is_primary)
+        cart = require_visible_cart(
+            db, body.household_id, checkout_session.open_cart_id(db, body.target), caller, is_primary,
+        )
         result = add_rows_to_cart(
             db, request, body.household_id, cart, caller, body.item_ids, now,
             find="SELECT id, sku, quantity FROM personal_list_items WHERE list_id = ? AND id = ?", list_id=list_id,

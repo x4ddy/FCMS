@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { DeliveryMap } from './DeliveryMap.jsx'
+import { confirmAction, Icon } from './ui.jsx'
 
 function coordinateFields(pin) {
   return { latitude: String(pin?.latitude ?? ''), longitude: String(pin?.longitude ?? '') }
@@ -181,7 +182,7 @@ export function AddressForm({ busy, displayName, api, onSave, buttonLabel }) {
   }
 
   return <div className="address-wizard">
-    <ol className="address-steps" aria-label="Add address progress">
+    <ol className="steps" aria-label="Add address progress">
       <li aria-current={showDetails ? undefined : 'step'}>1. Map pin</li>
       <li aria-current={showDetails ? 'step' : undefined}>2. Full address</li>
     </ol>
@@ -242,29 +243,46 @@ function SavedAddressMap({ address, api, canEdit, busy, onUpdatePin, onClose }) 
 }
 
 export function AddressBook({ addresses, api, displayName, busy, onSave, onDelete, onUpdatePin,
-  canEdit = () => true, buttonLabel = 'Save address', ownerName }) {
+  canEdit = () => true, buttonLabel = 'Save address', ownerName, startOpen = false }) {
   const [selectedId, setSelectedId] = useState(null)
-  return <>
-    <AddressForm api={api} busy={busy} displayName={displayName} onSave={onSave} buttonLabel={buttonLabel} />
-    <ul className="address-list">{addresses.map((address) => {
+  const [adding, setAdding] = useState(startOpen)
+  const form = <AddressForm api={api} busy={busy} displayName={displayName} buttonLabel={buttonLabel}
+    onSave={async (address) => {
+      const saved = await onSave(address)
+      if (saved && !startOpen) setAdding(false)
+      return saved
+    }} />
+  return <div className="address-book">
+    {addresses.length > 0 && <ul className="address-list">{addresses.map((address) => {
       const selected = selectedId === address.id
       const editable = canEdit(address)
-      return <li key={address.id}>
-        <div className="address-card-heading">
-          <div><strong>{address.label}</strong>{ownerName && <span className="address-owner">{ownerName(address)}</span>}<span>{address.recipient_name}</span>
-            <small>{address.address_line1}{address.address_line2 && `, ${address.address_line2}`}, {address.city}</small></div>
-          <div className="address-actions">
+      return <li key={address.id} className="panel">
+        <div className="address-card">
+          <Icon name="pin" size={22} />
+          <div className="address-card-text">
+            <strong>{address.label}{ownerName && <span className="tag">{ownerName(address)}</span>}</strong>
+            <span>{address.recipient_name}</span>
+            <small className="muted">{address.address_line1}{address.address_line2 && `, ${address.address_line2}`}, {address.city}</small>
+          </div>
+          <div className="row-actions">
             <button type="button" className="secondary" disabled={busy} aria-expanded={selected}
               onClick={() => setSelectedId(selected ? null : address.id)}>
-              {address.latitude == null && editable ? 'Add map pin' : 'Check coverage'}
+              {address.latitude == null && editable ? 'Add map pin' : selected ? 'Hide map' : 'Check coverage'}
             </button>
-            {onDelete && editable && <button className="secondary danger" disabled={busy}
-              onClick={() => onDelete(address.id)}>Remove</button>}
+            {onDelete && editable && <button className="secondary danger" disabled={busy} onClick={async () => {
+              if (await confirmAction({ title: `Remove ${address.label}?`, text: `${address.address_line1}, ${address.city}`, action: 'Remove', danger: true })) {
+                onDelete(address.id)
+              }
+            }}>Remove</button>}
           </div>
         </div>
         {selected && <SavedAddressMap address={address} api={api} canEdit={editable} busy={busy}
           onUpdatePin={onUpdatePin} onClose={() => setSelectedId(null)} />}
       </li>
-    })}</ul>
-  </>
+    })}</ul>}
+    {startOpen ? <section className="panel">{form}</section> : adding ? <section className="panel">
+      <div className="section-head"><h2>New address</h2><button className="text-button" onClick={() => setAdding(false)}>Cancel</button></div>
+      {form}
+    </section> : <button className="secondary add-address" onClick={() => setAdding(true)}><Icon name="plus" size={18} /> Add an address</button>}
+  </div>
 }

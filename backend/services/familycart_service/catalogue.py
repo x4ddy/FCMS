@@ -28,4 +28,6 @@ def load_catalogue() -> dict[str, Product]:
     by_sku = {product.sku: product for product in products}
     if len(by_sku) != len(products):
         raise ValueError("Catalogue contains duplicate SKUs")
+    if any(product.category == "Tobacco" and product.min_age < 18 for product in products):
+        raise ValueError("Tobacco products must have a minimum age of 18")
     return by_sku

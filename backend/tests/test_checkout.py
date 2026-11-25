@@ -179,6 +179,7 @@ class CheckoutTests(unittest.TestCase):
         self.assert_problem(self.place(quote, outcome="decline"), 409, "IDEMPOTENCY_KEY_REUSED")
 
     def test_shared_split_grouping_and_committed_event(self):
+        self.enterContext(patch.object(cart_app.state.live_sync, "publish_now"))  # leave the event to look at
         self.grant_member()
         dubai = self.address()
         al_ain = self.address(AL_AIN, kind="household", headers=self.member, recipient_name="Al Ain Recipient")
@@ -206,6 +207,42 @@ class CheckoutTests(unittest.TestCase):
         self.assertTrue(summary["is_shared"])
         self.assertEqual(summary["delivery_count"], 2)
 
+    def test_only_selected_products_are_ordered(self):
+        address = self.address(kind="household")
+        self.grant_member()
+        self.item(shared=True, quantity=2)
+        self.item("eggs", shared=True)
+        self.item("bread", shared=True, headers=self.member)
+
+        def review(skus):
+            return self.cart.post(f"{API}/checkout/quotes", headers=self.owner, json={
+                "cart": SHARED, "default_address": address, "skus": skus,
+            })
+
+        self.assertEqual(review([]).status_code, 422)
+        self.assert_problem(review(["milk", "honey"]), 409, "SELECTION_CHANGED")
+        quote = review(["milk", "bread"]).json()
+        lines = [line["sku"] for group in quote["delivery_groups"] for line in group["lines"]]
+        self.assertEqual((sorted(lines), quote["total_fils"]), (["bread", "milk"], 1500 + 390))
+        stale = review(["bread"]).json()
+        placed = self.place(quote)
+        self.assertEqual(placed.status_code, 201, placed.text)
+        left = self.cart.get(REGULAR_CART, headers=self.owner).json()["contributions"]
+        self.assertEqual([(row["sku"], row["quantity"]) for row in left], [("eggs", 1)])
+        # The other review names a product that has been ordered since.
+        self.assert_problem(self.place(stale, "second"), 409, "QUOTE_STALE")
+
+    def test_selected_personal_products_are_ordered(self):
+        address = self.address()
+        self.item(quantity=1)
+        self.item("eggs")
+        quote = self.cart.post(f"{API}/checkout/quotes", headers=self.owner, json={
+            "cart": PERSONAL, "default_address": address, "skus": ["eggs"],
+        }).json()
+        self.assertEqual(self.place(quote).status_code, 201)
+        items = self.cart.get(f"{API}/personal-cart", headers=self.owner).json()["items"]
+        self.assertEqual([row["sku"] for row in items], ["milk"])
+
     def test_order_history_newest_first_cursor_is_purchaser_scoped(self):
         address = self.address()
         order_ids = []
@@ -230,7 +267,7 @@ class CheckoutTests(unittest.TestCase):
         dubai = self.address()
         private = self.address(headers=self.member)
         quote = self.quote(dubai, cart=SHARED)
-        self.assert_problem(self.review(dubai, cart=SHARED, headers=self.member), 403, "CHECKOUT_FORBIDDEN")
+        self.assert_problem(self.review(dubai, cart=SHARED, headers=self.member), 404, "ADDRESS_NOT_FOUND")
         self.assert_problem(self.review(dubai, cart=SHARED, headers=self.minor), 403, "AGE_ELIGIBILITY_REQUIRED")
         self.assert_problem(self.review(dubai, cart=SHARED, headers=self.user("unrelated")), 404, "CART_NOT_FOUND")
         self.assert_problem(self.review(private, cart=SHARED), 404, "ADDRESS_NOT_FOUND")
@@ -239,7 +276,6 @@ class CheckoutTests(unittest.TestCase):
         body = {"cart": SHARED, "default_address": dubai, "is_adult": True}
         self.assertEqual(self.cart.post(f"{API}/checkout/quotes", headers=self.minor, json=body).status_code, 422)
         self.assertEqual(self.cart.put(f"{HOUSEHOLD}/members/user-adult/primary", headers=self.owner).status_code, 200)
-        self.assert_problem(self.place(quote), 403, "CHECKOUT_FORBIDDEN")
         self.assertEqual(self.cart.delete(f"{HOUSEHOLD}/members/user-primary", headers=self.member).status_code, 204)
         self.assert_problem(self.place(quote), 404, "CART_NOT_FOUND")
 

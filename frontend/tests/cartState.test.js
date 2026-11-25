@@ -1,44 +1,32 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyCartSnapshot, applyConfirmedEdit } from '../src/cartState.js'
+import { applyAdjustment, cartQuantities, cartRows, withTaps } from '../src/cartState.js'
 
-const cartId = 'regular-cart'
-const ownMilk = (quantity) => ({ sku: 'milk', contributor_id: 'user-primary', quantity })
-const childMilk = { sku: 'milk', contributor_id: 'user-child', quantity: 2 }
-const initial = () => ({
-  cart: { id: cartId, contributions: [] }, snapshotRevision: 0, pendingEdits: new Map(),
+const row = (sku, contributor_id, quantity) => ({ sku, contributor_id, quantity })
+
+test('quantities add up across members and unsaved taps go on top', () => {
+  const totals = cartQuantities([row('milk', 'a', 2), row('milk', 'b', 1), row('eggs', 'a', 1)])
+  assert.deepEqual(totals, { milk: 3, eggs: 1 })
+  assert.deepEqual(withTaps(totals, { milk: 1 }, { milk: 1, eggs: -5, bread: 2 }), { milk: 5, eggs: 0, bread: 2 })
+  assert.deepEqual(totals, { milk: 3, eggs: 1 })
 })
 
-test('confirmed changes appear only in the editing view until a shared snapshot arrives', () => {
-  let editor = applyConfirmedEdit(initial(), cartId, { ...ownMilk(4), revision: 2 })
-  const viewer = initial()
-  assert.deepEqual(editor.cart.contributions, [ownMilk(4)])
-  assert.deepEqual(viewer.cart.contributions, [])
-
-  editor = applyCartSnapshot(editor, { id: cartId, contributions: [childMilk] }, 1)
-  assert.deepEqual(editor.cart.contributions, [childMilk, ownMilk(4)])
-  const finalCart = { id: cartId, contributions: [childMilk, ownMilk(4)] }
-  editor = applyCartSnapshot(editor, finalCart, 2)
-  assert.deepEqual(editor.cart, applyCartSnapshot(viewer, finalCart, 2).cart)
-  assert.equal(editor.pendingEdits.size, 0)
+test('adding goes to your own line', () => {
+  assert.deepEqual(applyAdjustment([row('milk', 'b', 1)], 'milk', 2, 'a'), [row('milk', 'b', 1), row('milk', 'a', 2)])
+  assert.deepEqual(applyAdjustment([row('milk', 'a', 1)], 'milk', 2, 'a'), [row('milk', 'a', 3)])
 })
 
-test('a stale batch or acknowledgement cannot resurrect a removed contribution', () => {
-  let editor = applyCartSnapshot(initial(), { id: cartId, contributions: [ownMilk(4)] }, 2)
-  editor = applyConfirmedEdit(editor, cartId, { ...ownMilk(0), revision: 4 })
-  assert.deepEqual(editor.cart.contributions, [])
-  editor = applyCartSnapshot(editor, { id: cartId, contributions: [ownMilk(6)] }, 3)
-  assert.deepEqual(editor.cart.contributions, [])
-  editor = applyCartSnapshot(editor, { id: cartId, contributions: [] }, 4)
-  assert.equal(editor.pendingEdits.size, 0)
-  assert.equal(applyConfirmedEdit(editor, cartId, { ...ownMilk(6), revision: 3 }), editor)
+test('removing takes your own units first and then other members in order', () => {
+  const before = [row('milk', 'c', 2), row('milk', 'b', 1), row('milk', 'z', 1), row('eggs', 'b', 4)]
+  assert.deepEqual(applyAdjustment(before, 'milk', -3, 'z'), [row('milk', 'c', 1), row('eggs', 'b', 4)])
+  assert.equal(before[0].quantity, 2)
 })
 
-test('removing another user’s item preserves your pending quantity for the same product', () => {
-  const oldCart = { id: cartId, contributions: [childMilk] }
-  let editor = applyCartSnapshot(initial(), oldCart, 1)
-  editor = applyConfirmedEdit(editor, cartId, { ...ownMilk(5), revision: 2 })
-  editor = applyConfirmedEdit(editor, cartId, { ...childMilk, quantity: 0, revision: 3 })
-  editor = applyCartSnapshot(editor, oldCart, 1)
-  assert.deepEqual(editor.cart.contributions, [ownMilk(5)])
+test('cart rows follow the catalogue, hide empty ones and keep products that are no longer listed', () => {
+  const products = [{ sku: 'eggs' }, { sku: 'milk' }, { sku: 'bread' }]
+  const contributions = [row('milk', 'a', 1), row('gone', 'b', 1), row('eggs', 'a', 1)]
+  const rows = cartRows(contributions, { milk: 1, eggs: 1, bread: 0, gone: 1 }, products)
+  assert.deepEqual(rows.map((item) => item.sku), ['eggs', 'milk', 'gone'])
+  assert.equal(rows[2].product, null)
+  assert.deepEqual(rows[1].people, [row('milk', 'a', 1)])
 })

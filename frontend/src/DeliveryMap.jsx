@@ -96,7 +96,7 @@ function LeafletMap({ leaflet: L, stores, latitude, longitude, selectedStore, on
   useEffect(() => {
     for (const [id, { circle, marker }] of markers.current) {
       const selected = id === selectedStore
-      const color = selected ? '#137443' : '#386bc0'
+      const color = selected ? '#7c3aed' : '#386bc0'
       circle.setStyle({ color, fillOpacity: selected ? 0.22 : 0.08, weight: selected ? 3 : 1.5 })
       marker.setStyle({ color, fillColor: color, fillOpacity: 1, weight: 2 })
       if (selected) marker.bringToFront()

@@ -50,19 +50,19 @@ export async function refreshAccessToken() {
   return (await restoreSession()).access_token
 }
 
-async function request(path, { token, method = 'GET', body, retry = true, signal, idempotencyKey } = {}) {
+async function request(path, { token, method = 'GET', body, retry = true, signal, idempotencyKey, keepalive } = {}) {
   const headers = {}
   const bearer = token ? (activeAccessToken || token) : null
   if (bearer) headers.Authorization = `Bearer ${bearer}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
   const response = await fetch(path, {
-    method, headers, body: JSON.stringify(body), cache: 'no-store', credentials: 'include', signal,
+    method, headers, body: JSON.stringify(body), cache: 'no-store', credentials: 'include', signal, keepalive,
   })
   if (response.status === 401 && token && retry) {
     signal?.throwIfAborted()
     const refreshedToken = await refreshAccessToken()
-    return request(path, { token: refreshedToken, method, body, retry: false, signal, idempotencyKey })
+    return request(path, { token: refreshedToken, method, body, retry: false, signal, idempotencyKey, keepalive })
   }
   if (response.status === 204) return
 
@@ -194,6 +194,18 @@ export function householdApi(token, householdId) {
     create: (name, adultsOnly) => request(carts, { token, method: 'POST', body: { name, adults_only: adultsOnly } }),
     capabilities: () => request(`${household}/capabilities`, { token }),
     cart: (id) => request(cartPath(id), { token }),
+    // Opens checkout, or keeps it open, and returns the cart as it is now.
+    startCheckout: (id) => request(`${cartPath(id)}/checkout`, { token, method: 'POST' }),
+    // keepalive lets this finish while the page is closing.
+    leaveCheckout: (id) => request(`${cartPath(id)}/checkout`, { token, method: 'DELETE', keepalive: true }),
+    leave: () => request(`${household}/leave`, { token, method: 'POST' }),
+    deleteHousehold: () => request(household, { token, method: 'DELETE' }),
+    memberRequests: () => request(`${household}/member-requests`, { token }),
+    requestMember: (name, note) => request(`${household}/member-requests`, { token, method: 'POST', body: { name, note } }),
+    decideMemberRequest: (id, approved) => request(`${household}/member-requests/${encodeURIComponent(id)}`, {
+      token, method: 'PUT', body: { approved },
+    }),
+    requestedInvitation: (id) => request(`${household}/member-requests/${encodeURIComponent(id)}/invitation`, { token, method: 'POST' }),
     deleteCart: (id) => request(cartPath(id), { token, method: 'DELETE' }),
     members: () => request(`${household}/members?include_roles=true`, { token }),
     transferHouseholdOwnership: (memberId) => request(

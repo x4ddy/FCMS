@@ -74,7 +74,7 @@ class HouseholdAccountTests(unittest.TestCase):
         self.assertEqual(revoked.status_code, 403)
         self.assertEqual(
             revoked.json()["detail"],
-            "Your household access was revoked. Contact Primary User, the primary account holder.",
+            "Your household access was revoked. Contact Primary User, the household admin.",
         )
 
     def test_members_share_addresses_with_owner_and_primary_delete_permissions(self) -> None:

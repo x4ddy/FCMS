@@ -90,7 +90,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(
             denied.json()["detail"],
-            "You no longer have access to this cart. Contact Primary Customer, the primary account holder.",
+            "You no longer have access to this cart. Contact Primary Customer, the household admin.",
         )
         self.assertEqual(self.cart.get(REGULAR, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.get(CARTS, headers=self.child).json(), [])
@@ -152,7 +152,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertIsNone(view["cart"])
         self.assertEqual(
             view["access_notice"],
-            "You no longer have access to this cart. Contact Primary Customer, the primary account holder.",
+            "You no longer have access to this cart. Contact Primary Customer, the household admin.",
         )
 
         initialize_database(self.db_path)
@@ -302,8 +302,8 @@ class StageTwoTests(unittest.TestCase):
 
     def test_catalogue_items_can_be_added_and_removed_with_age_rules(self) -> None:
         products = self.cart.get("/api/v1/products", headers=self.primary).json()
-        self.assertEqual(len(products), 20)
-        self.assertEqual(len(self.cart.get("/api/v1/products", headers=self.child).json()), 19)
+        self.assertEqual(len(products), 113)
+        self.assertEqual(len(self.cart.get("/api/v1/products", headers=self.child).json()), 112)
         self.assertEqual(
             self.cart.get(
                 "/api/v1/products", params={"q": "cigarette"}, headers=self.child

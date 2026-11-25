@@ -1,5 +1,3 @@
-const contributionKey = ({ sku, contributor_id }) => JSON.stringify([sku, contributor_id])
-
 function contributionQuantities(contributions = []) {
   return new Map(contributions.map((item) => [
     `${item.contributor_id}\u0000${item.sku}`,
@@ -26,7 +24,7 @@ export function cartActivity(previous, current, currentUserId, actorId, memberNa
   const after = contributionQuantities(current)
   const keys = new Set([...before.keys(), ...after.keys()])
 
-  // Checkout empties the cart. That is one order, not a removal of every item.
+  // Checkout removes what was ordered. That is one order, not a removal of every item.
   const order = orderedBy && orderedBy !== currentUserId
     ? [`${memberNames.get(orderedBy) ?? 'A household member'} placed an order`] : []
   const changes = [...keys].flatMap((key) => {
@@ -44,33 +42,74 @@ export function cartActivity(previous, current, currentUserId, actorId, memberNa
   return [...order, ...changes]
 }
 
-function mergeContributions(contributions, edits) {
-  const rows = new Map(contributions.map((row) => [contributionKey(row), row]))
-  for (const { sku, contributor_id, quantity } of edits) {
-    const row = { sku, contributor_id, quantity }
-    if (quantity === 0) rows.delete(contributionKey(row))
-    else rows.set(contributionKey(row), row)
+/** Cart contents plus what waits for the next cart, so moving between them is not an addition or a removal. */
+export function combined(cart) {
+  const rows = new Map()
+  for (const row of [...cart.contributions, ...cart.waiting ?? []]) {
+    const key = `${row.contributor_id}\u0000${row.sku}`
+    rows.set(key, { ...row, quantity: row.quantity + (rows.get(key)?.quantity ?? 0) })
   }
-  return [...rows.values()].sort((a, b) =>
-    a.sku.localeCompare(b.sku) || a.contributor_id.localeCompare(b.contributor_id),
-  )
+  return [...rows.values()]
 }
 
-export function applyConfirmedEdit(detail, cartId, edit) {
-  if (detail?.cart.id !== cartId || edit.revision <= detail.snapshotRevision) return detail
-  const key = contributionKey(edit)
-  const previous = detail.pendingEdits.get(key)
-  if (previous?.revision >= edit.revision) return detail
-
-  const pendingEdits = new Map(detail.pendingEdits).set(key, edit)
-  const contributions = mergeContributions(detail.cart.contributions, [edit])
-  return { ...detail, pendingEdits, cart: { ...detail.cart, contributions } }
+/** What changed between the cart on screen and the latest one, per product. */
+export function cartDifferences(shown, latest, productNames) {
+  const before = cartQuantities(shown)
+  const after = cartQuantities(latest)
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((sku) => {
+    const difference = (after[sku] ?? 0) - (before[sku] ?? 0)
+    const name = productNames.get(sku) ?? sku
+    if (!difference) return []
+    return [difference > 0 ? `${difference} × ${name} added` : `${-difference} × ${name} removed`]
+  })
 }
 
-export function applyCartSnapshot(detail, cart, revision) {
-  if (detail?.cart.id !== cart.id || revision < detail.snapshotRevision) return detail
+/** Total quantity of each product across everyone in the cart. */
+export function cartQuantities(contributions = []) {
+  return contributions.reduce((totals, item) => ({
+    ...totals, [item.sku]: (totals[item.sku] ?? 0) + item.quantity,
+  }), {})
+}
 
-  const pendingEdits = new Map([...detail.pendingEdits].filter(([, edit]) => edit.revision > revision))
-  const contributions = mergeContributions(cart.contributions, pendingEdits.values())
-  return { ...detail, snapshotRevision: revision, pendingEdits, cart: { ...cart, contributions } }
+/** Quantities with taps that are not saved yet on top. */
+export function withTaps(quantities, ...taps) {
+  const next = { ...quantities }
+  for (const [sku, delta] of taps.flatMap((group) => Object.entries(group))) {
+    next[sku] = Math.max(0, (next[sku] ?? 0) + delta)
+  }
+  return next
+}
+
+/**
+ * Apply a saved change the way the server does: adding goes to your own line,
+ * removing takes your own units first and then other members'.
+ */
+export function applyAdjustment(contributions, sku, delta, userId) {
+  const rows = contributions.map((row) => ({ ...row }))
+  if (delta > 0) {
+    const own = rows.find((row) => row.sku === sku && row.contributor_id === userId)
+    if (own) own.quantity += delta
+    else rows.push({ sku, contributor_id: userId, quantity: delta })
+    return rows
+  }
+  let remaining = -delta
+  const order = rows.filter((row) => row.sku === sku).sort((a, b) =>
+    (b.contributor_id === userId) - (a.contributor_id === userId) || (a.contributor_id < b.contributor_id ? -1 : 1))
+  for (const row of order) {
+    const taken = Math.min(remaining, row.quantity)
+    row.quantity -= taken
+    remaining -= taken
+  }
+  return rows.filter((row) => row.quantity > 0)
+}
+
+/** One row per product in the cart, in catalogue order, with everyone who added it. */
+export function cartRows(contributions, quantities, products) {
+  const rows = products.filter((product) => quantities[product.sku] > 0)
+    .map((product) => ({ sku: product.sku, product, quantity: quantities[product.sku] }))
+  const known = new Set(products.map((product) => product.sku))
+  for (const sku of Object.keys(quantities)) {
+    if (!known.has(sku) && quantities[sku] > 0) rows.push({ sku, product: null, quantity: quantities[sku] })
+  }
+  return rows.map((row) => ({ ...row, people: contributions.filter((item) => item.sku === row.sku) }))
 }

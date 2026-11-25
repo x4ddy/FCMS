@@ -32,9 +32,9 @@ from backend.shared.tokens import Identity, load_jwt_secret, verify_token
 from backend.services.refresh_service.service import session_profile
 from backend.services.user_service.db import birth_dates, database_path as user_database_path
 
-from . import checkout
+from . import checkout, checkout_session
 from .live_sync import (
-    AccessEnded, LiveSync, build_snapshots, household_revision, notify_changed, viewer_role,
+    HOUSEHOLD_DELETED, AccessEnded, LiveSync, build_snapshots, household_revision, notify_changed, viewer_role,
 )
 from .catalogue import Product, load_catalogue
 from .db import (
@@ -71,6 +71,7 @@ class CartResponse(BaseModel):
     adults_only: bool
     can_edit_items: bool
     can_manage_access: bool
+    can_checkout: bool
 
 
 class Contribution(BaseModel):
@@ -85,13 +86,41 @@ class ContributionUpdate(Contribution):
 
 class SharedItemUpdate(BaseModel):
     sku: str
+    # In the cart and waiting for the next one, together.
     quantity: int
     revision: int
+    waiting: bool = False
+
+
+class CheckoutSession(BaseModel):
+    user_id: str
+    expires_at: str
 
 
 class CartDetail(CartResponse):
     contributions: list[Contribution]
     can_delete_cart: bool
+    # Set while somebody is checking this cart out; items added meanwhile wait for the next cart.
+    checkout: CheckoutSession | None = None
+    waiting: list[Contribution] = []
+
+
+class MemberRequestInput(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    note: Annotated[str | None, StringConstraints(strip_whitespace=True, max_length=200)] = None
+
+
+class MemberRequest(BaseModel):
+    id: str
+    requested_by: str
+    name: str
+    note: str | None = None
+    status: str
+    created_at: str
+
+
+class MemberRequestDecision(BaseModel):
+    approved: bool = Field(strict=True)
 
 
 class MemberResponse(BaseModel):
@@ -281,9 +310,11 @@ def household_access(
             membership = None if conceal_revoked else household_member(db, household_id, caller.user_id)
             if membership is not None and not bool(membership["active"]):
                 primary_name = household_primary_name(db, household_id)
+                if not bool(household_member(db, household_id, membership["owner_id"])["active"]):
+                    raise HTTPException(status_code=404, detail=HOUSEHOLD_DELETED)
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Your household access was revoked. Contact {primary_name}, the primary account holder.",
+                    detail=f"Your household access was revoked. Contact {primary_name}, the household admin.",
                 )
             raise HTTPException(status_code=404, detail="Household not found")
         if isinstance(caller, RequestIdentity) and not age_allowed(member["age_status"]):
@@ -337,6 +368,7 @@ def cart_access(cart, caller: Identity, is_primary: bool) -> CartResponse | None
         adults_only=adults_only,
         can_edit_items=True,
         can_manage_access=is_primary,
+        can_checkout=caller.is_adult,
     )
 
 
@@ -350,12 +382,12 @@ def household_primary_name(db: DatabaseConnection, household_id: str) -> str:
            WHERE household.household_id = ?""",
         (household_id,),
     ).fetchone()
-    return row["display_name"] if row and row["display_name"] else "the primary account holder"
+    return row["display_name"] if row and row["display_name"] else "the household admin"
 
 
 def cart_access_revoked_message(db: DatabaseConnection, household_id: str) -> str:
     primary_name = household_primary_name(db, household_id)
-    return f"You no longer have access to this cart. Contact {primary_name}, the primary account holder."
+    return f"You no longer have access to this cart. Contact {primary_name}, the household admin."
 
 
 def require_visible_cart(
@@ -374,7 +406,7 @@ def require_visible_cart(
 
 def require_primary(is_primary: bool) -> None:
     if not is_primary:
-        raise HTTPException(status_code=403, detail="Only the household primary can make this change")
+        raise HTTPException(status_code=403, detail="Only the household admin can make this change")
 
 
 def can_delete_cart(db: DatabaseConnection, cart: CartResponse, caller: Identity) -> bool:
@@ -539,22 +571,108 @@ def create_household(body: CreateHousehold, request: Request, caller: Caller) ->
 def create_invitation(
     household_id: str, request: Request, caller: Caller
 ) -> CreateInvitationResponse:
-    code = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(code.encode()).hexdigest()
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=7)
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_primary(is_primary)
-        db.execute(
-            """INSERT INTO household_invitations
-               (id, household_id, token_hash, invited_by, expires_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                str(uuid4()), household_id, token_hash, caller.user_id,
-                expires_at.isoformat(), now.isoformat(),
-            ),
-        )
+        return new_invitation(db, household_id, caller.user_id)
+
+
+def new_invitation(db: DatabaseConnection, household_id: str, invited_by: str) -> CreateInvitationResponse:
+    code = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=7)
+    db.execute(
+        """INSERT INTO household_invitations
+           (id, household_id, token_hash, invited_by, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (str(uuid4()), household_id, hashlib.sha256(code.encode()).hexdigest(), invited_by,
+         expires_at.isoformat(), now.isoformat()),
+    )
     return CreateInvitationResponse(invitation_code=code, expires_at=expires_at.isoformat())
+
+
+MEMBER_REQUESTS = f"{HOUSEHOLD}/member-requests"
+REQUEST_COLUMNS = "id, requested_by, name, note, status, created_at"
+
+
+def require_primary_user(caller: Identity) -> None:
+    if not caller.is_adult:
+        raise HTTPException(status_code=403, detail="Child users cannot ask for new members")
+
+
+@app.get(MEMBER_REQUESTS)
+def list_member_requests(household_id: str, request: Request, caller: Caller) -> list[MemberRequest]:
+    """Requests waiting for the admin, and the caller's own."""
+    with household_access(request, household_id, caller) as (db, is_primary):
+        if not caller.is_adult and not is_primary:
+            return []
+        rows = db.execute(
+            f"""SELECT {REQUEST_COLUMNS} FROM member_requests
+                WHERE household_id = ? AND ((? AND status = 'PENDING') OR (requested_by = ? AND status IN ('PENDING', 'APPROVED')))
+                ORDER BY created_at, id""",
+            (household_id, is_primary, caller.user_id),
+        ).fetchall()
+        return [MemberRequest(**dict(row)) for row in rows]
+
+
+@app.post(MEMBER_REQUESTS, status_code=201)
+def request_member(household_id: str, body: MemberRequestInput, request: Request, caller: Caller) -> MemberRequest:
+    """A primary user asks the admin to let somebody join."""
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        if is_primary:
+            raise HTTPException(status_code=409, detail="You are the admin. Invite the member directly.")
+        require_primary_user(caller)
+        waiting = db.execute(
+            """SELECT COUNT(*) AS n FROM member_requests
+               WHERE household_id = ? AND requested_by = ? AND status = 'PENDING'""", (household_id, caller.user_id),
+        ).fetchone()["n"]
+        if waiting >= 10:
+            raise HTTPException(status_code=409, detail="You already have 10 requests waiting for the admin")
+        created = MemberRequest(
+            id=str(uuid4()), requested_by=caller.user_id, name=body.name, note=body.note or None, status="PENDING",
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        db.execute(
+            f"INSERT INTO member_requests (household_id, {REQUEST_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (household_id, created.id, created.requested_by, created.name, created.note, created.status, created.created_at),
+        )
+        notify_changed(db, household_id)
+        return created
+
+
+@app.put(f"{MEMBER_REQUESTS}/{{request_id}}", status_code=204)
+def decide_member_request(
+    household_id: str, request_id: str, body: MemberRequestDecision, request: Request, caller: Caller
+) -> Response:
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        require_primary(is_primary)
+        updated = db.execute(
+            """UPDATE member_requests SET status = ?, decided_at = ?
+               WHERE id = ? AND household_id = ? AND status = 'PENDING'""",
+            ("APPROVED" if body.approved else "REJECTED", datetime.now(timezone.utc).isoformat(), request_id, household_id),
+        )
+        if not updated.rowcount:
+            raise HTTPException(status_code=404, detail="This request is no longer waiting")
+        notify_changed(db, household_id)
+    return Response(status_code=204)
+
+
+@app.post(f"{MEMBER_REQUESTS}/{{request_id}}/invitation", status_code=201)
+def collect_requested_invitation(
+    household_id: str, request_id: str, request: Request, caller: Caller
+) -> CreateInvitationResponse:
+    """The one-time code for an approved request, for the person who asked."""
+    with household_access(request, household_id, caller, write=True) as (db, _):
+        require_primary_user(caller)
+        used = db.execute(
+            """UPDATE member_requests SET status = 'USED'
+               WHERE id = ? AND household_id = ? AND requested_by = ? AND status = 'APPROVED'""",
+            (request_id, household_id, caller.user_id),
+        )
+        if not used.rowcount:
+            raise HTTPException(status_code=404, detail="This request has no invitation to collect")
+        admin = active_member(db, household_id, caller.user_id)["owner_id"]
+        notify_changed(db, household_id)
+        return new_invitation(db, household_id, admin)
 
 
 @app.post(f"{API_PREFIX}/household-invitations/accept")
@@ -695,7 +813,7 @@ def create_cart(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_primary(is_primary)
         if body.adults_only and not can_create_adults_only_cart(caller, is_primary):
-            raise HTTPException(status_code=403, detail="Only an adult household primary can create an adults-only cart")
+            raise HTTPException(status_code=403, detail="Only an adult household admin can create an adults-only cart")
         db.execute(
             "INSERT INTO carts (id, household_id, creator_id, name, adults_only) VALUES (?, ?, ?, ?, ?)",
             # PostgreSQL stores this flag as SMALLINT, so bind an integer rather
@@ -724,8 +842,86 @@ def create_cart(
 def get_cart(household_id: str, cart_id: str, request: Request, caller: Caller) -> CartDetail:
     with household_access(request, household_id, caller) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
-        rows = visible_contributions(request, caller, load_contributions(db, cart_id))
-        return CartDetail(**cart.model_dump(), contributions=rows, can_delete_cart=can_delete_cart(db, cart, caller))
+        session = checkout_session.stored_session(db, cart_id)
+        if session is None or not checkout_session.expired(session):
+            return cart_detail(request, db, cart, caller)
+    # Somebody left checkout without saying so. Give their waiting items back to the cart.
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
+        checkout_session.current_session(db, household_id, cart_id)
+        return cart_detail(request, db, cart, caller)
+
+
+def cart_detail(request: Request, db: DatabaseConnection, cart: CartResponse, caller: Identity) -> CartDetail:
+    session = checkout_session.stored_session(db, cart.id)
+    return CartDetail(
+        **cart.model_dump(), can_delete_cart=can_delete_cart(db, cart, caller),
+        contributions=visible_contributions(request, caller, load_contributions(db, cart.id)),
+        waiting=visible_contributions(request, caller, checkout_session.waiting_rows(db, cart.id)),
+        checkout=CheckoutSession(user_id=session["user_id"], expires_at=session["expires_at"]) if session else None,
+    )
+
+
+def member_name(db: DatabaseConnection, household_id: str, user_id: str) -> str:
+    row = db.execute(
+        "SELECT display_name FROM household_member_profiles WHERE household_id = ? AND user_id = ?",
+        (household_id, user_id),
+    ).fetchone()
+    return row["display_name"] if row else "Another member"
+
+
+def being_checked_out(db: DatabaseConnection, household_id: str, session) -> HTTPException:
+    name = member_name(db, household_id, session["user_id"])
+    return HTTPException(
+        status_code=409, detail=f"{name} is checking out this cart. Its items cannot be changed until they finish.",
+    )
+
+
+def refuse_other_checkout(db: DatabaseConnection, reference, caller: Identity) -> None:
+    """One person checks out a shared cart at a time."""
+    if reference.kind != "household":
+        return
+    session = checkout_session.stored_session(db, reference.cart_id)
+    if session is None or session["user_id"] == caller.user_id or checkout_session.expired(session):
+        return
+    name = member_name(db, reference.household_id, session["user_id"])
+    raise checkout.error(409, "CHECKOUT_IN_PROGRESS", f"{name} is already checking out this cart.")
+
+
+@app.post(f"{HOUSEHOLD}/carts/{{cart_id}}/checkout")
+def start_checkout(household_id: str, cart_id: str, request: Request, caller: Caller) -> CartDetail:
+    """Open checkout, or keep it open. Returns the cart as it is now; from here its contents stand still."""
+    reference = checkout.HouseholdCart(kind="household", household_id=household_id, cart_id=cart_id)
+    with household_access(request, household_id, caller):
+        pass  # a stranger learns nothing about ages or carts
+    require_checkout_adult(request, caller, reference)
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
+        refuse_other_checkout(db, reference, caller)
+        mine = checkout_session.current_session(db, household_id, cart_id)
+        if mine is None and not load_contributions(db, cart_id):
+            raise checkout.error(409, "EMPTY_CART", "Add something to your cart before checkout.")
+        checkout_session.save_session(db, household_id, cart_id, caller.user_id)
+        if mine is None:
+            record_cart_change(db, household_id, cart_id, caller.user_id)
+        detail = cart_detail(request, db, cart, caller)
+    if mine is None:
+        # Everybody's cart is brought up to date now instead of with the next batch.
+        request.app.state.live_sync.publish_now()
+    return detail
+
+
+@app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}/checkout", status_code=204)
+def leave_checkout(household_id: str, cart_id: str, request: Request, caller: Caller) -> Response:
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        session = checkout_session.stored_session(db, cart_id)
+        if session is None:
+            return Response(status_code=204)
+        if session["user_id"] != caller.user_id and not is_primary:
+            raise HTTPException(status_code=403, detail="Only the person checking out or the admin can end this checkout")
+        checkout_session.end_session(db, household_id, cart_id, caller.user_id)
+    request.app.state.live_sync.publish_now()
+    return Response(status_code=204)
 
 
 @app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}", status_code=204)
@@ -733,6 +929,9 @@ def remove_cart(household_id: str, cart_id: str, request: Request, caller: Calle
     with change_cart(request, household_id, cart_id, caller) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         require_primary(is_primary)
+        session = checkout_session.current_session(db, household_id, cart_id)
+        if session is not None:
+            raise being_checked_out(db, household_id, session)
         delete_cart(db, cart_id)
     return Response(status_code=204)
 
@@ -764,7 +963,7 @@ def decide_member_age(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_primary(is_primary)
         if not caller.is_adult:
-            raise HTTPException(status_code=403, detail="Only a primary aged 18 or over can approve ages")
+            raise HTTPException(status_code=403, detail="Only an admin aged 18 or over can approve ages")
         if member_id == caller.user_id:
             raise HTTPException(status_code=409, detail="You cannot approve your own age")
         member = active_member(db, household_id, member_id)
@@ -844,22 +1043,70 @@ def revoke_member(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_primary(is_primary)
         if member_id == caller.user_id:
-            raise HTTPException(status_code=409, detail="A primary cannot revoke their own access")
+            raise HTTPException(status_code=409, detail="The admin cannot remove themselves")
         member = active_member(db, household_id, member_id)
         if member is None:
             raise HTTPException(status_code=404, detail="Member not found")
         if member["owner_id"] == member_id:
-            raise HTTPException(status_code=409, detail="Another primary cannot be revoked")
+            raise HTTPException(status_code=409, detail="The admin cannot be removed")
+        end_membership(db, household_id, member_id, caller.user_id)
+    return Response(status_code=204)
+
+
+def end_membership(db: DatabaseConnection, household_id: str, member_id: str, actor_id: str) -> None:
+    db.execute(
+        "UPDATE household_members SET active = 0 WHERE household_id = ? AND user_id = ?", (household_id, member_id),
+    )
+    for row in db.execute(
+        "SELECT cart_id FROM checkout_sessions WHERE household_id = ? AND user_id = ?", (household_id, member_id),
+    ).fetchall():
+        checkout_session.end_session(db, household_id, row["cart_id"], actor_id)
+    db.execute("DELETE FROM cart_grants WHERE household_id = ? AND member_id = ?", (household_id, member_id))
+    db.execute("DELETE FROM member_requests WHERE household_id = ? AND requested_by = ?", (household_id, member_id))
+    for cart in db.execute("SELECT id FROM carts WHERE household_id = ?", (household_id,)).fetchall():
+        record_cart_change(db, household_id, cart["id"], actor_id)
+
+
+@app.post(f"{HOUSEHOLD}/leave", status_code=204)
+def leave_household(household_id: str, request: Request, caller: Caller) -> Response:
+    """A member exits. What they put in carts and lists stays; the admin can invite them again."""
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        if is_primary:
+            raise HTTPException(status_code=409, detail="Make someone else the admin first, or delete the household")
+        end_membership(db, household_id, caller.user_id, caller.user_id)
+    return Response(status_code=204)
+
+
+@app.delete(HOUSEHOLD, status_code=204)
+def delete_household(household_id: str, request: Request, caller: Caller) -> Response:
+    """The admin ends the household for everyone. Placed orders stay in each buyer's history.
+
+    Carts, lists, addresses, requests and invitations are erased. The household and member
+    rows stay, inactive, because orders and other records point at them.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        require_primary(is_primary)
+        for table in ("checkout_sessions", "cart_waiting_items", "cart_item_contributions", "member_requests",
+                      "shopping_list_items", "household_addresses"):
+            db.execute(f"DELETE FROM {table} WHERE household_id = ?", (household_id,))
         db.execute(
-            "UPDATE household_members SET active = 0 WHERE household_id = ? AND user_id = ?",
-            (household_id, member_id),
+            "UPDATE shopping_lists SET archived_at = ?, updated_at = ? WHERE household_id = ? AND archived_at IS NULL",
+            (now, now, household_id),
         )
-        db.execute(
-            "DELETE FROM cart_grants WHERE household_id = ? AND member_id = ?",
-            (household_id, member_id),
-        )
-        for cart in db.execute("SELECT id FROM carts WHERE household_id = ?", (household_id,)):
+        for cart in db.execute(
+            """SELECT id FROM carts WHERE household_id = ?
+               AND NOT EXISTS (SELECT 1 FROM deleted_carts WHERE deleted_carts.cart_id = carts.id)""", (household_id,),
+        ).fetchall():
+            delete_cart(db, cart["id"])
             record_cart_change(db, household_id, cart["id"], caller.user_id)
+        db.execute(
+            """UPDATE household_invitations SET revoked_at = ?
+               WHERE household_id = ? AND accepted_at IS NULL AND revoked_at IS NULL""", (now, household_id),
+        )
+        db.execute("UPDATE household_members SET active = 0 WHERE household_id = ?", (household_id,))
+        notify_changed(db, household_id)
+    request.app.state.live_sync.publish_now()
     return Response(status_code=204)
 
 
@@ -948,6 +1195,7 @@ def review_checkout(body: checkout.QuoteInput, request: Request, response: Respo
     products = request.app.state.products
     with transaction(path, write=True) as db:
         checkout.lock_cart(db, body.cart, caller)
+        refuse_other_checkout(db, body.cart, caller)
         state = checkout.snapshot(db, body, caller, products, lock=True)
     groups = checkout.resolve_groups(state["groups"], lambda lat, lon: resolve_address_pin(request, lat, lon))
     with transaction(path, write=True) as db:
@@ -1003,6 +1251,7 @@ def place_order(
         existing = replay(db)
         if existing:
             return existing
+        refuse_other_checkout(db, selection.cart, caller)
         checkout.load_quote(db, body.quote_id, caller.user_id)
         checkout.revalidate(db, reviewed["state"], selection, caller, products, lock=True)
         require_checkout_adult(request, caller, selection.cart)
@@ -1019,15 +1268,25 @@ def place_order(
         if body.mock_outcome == "decline":
             raise checkout.error(402, "MOCK_PAYMENT_DECLINED", "The mock payment declined. Try again when ready.")
         checkout.fulfill_order(db, order_id, groups, requested)
+        next_cart = None
+        # Only what was ordered leaves the cart.
+        ordered = sorted(set(selection.skus or ()))
+        only = f" AND sku IN ({', '.join('?' * len(ordered))})" if ordered else ""
         if selection.cart.kind == "personal":
-            db.execute("DELETE FROM personal_cart_items WHERE cart_id = ?", (state["cart_id"],))
+            db.execute(f"DELETE FROM personal_cart_items WHERE cart_id = ?{only}", (state["cart_id"], *ordered))
             increment_personal_revision(db, state["cart_id"], datetime.now(timezone.utc).isoformat())
         else:
-            db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (selection.cart.cart_id,))
+            db.execute(
+                f"DELETE FROM cart_item_contributions WHERE cart_id = ?{only}", (selection.cart.cart_id, *ordered),
+            )
             record_cart_change(
                 db, selection.cart.household_id, selection.cart.cart_id, caller.user_id, reason="order",
             )
-        return checkout.order_detail(db, order_id, caller.user_id)
+            next_cart = checkout_session.finish_session(db, selection.cart.household_id, selection.cart.cart_id)
+        placed = checkout.order_detail(db, order_id, caller.user_id)
+    if selection.cart.kind == "household":
+        request.app.state.live_sync.publish_now()
+    return {**placed, "next_cart": next_cart} if next_cart else placed
 
 
 @app.get(f"{API_PREFIX}/orders")
@@ -1290,6 +1549,14 @@ def save_quantity(
     db: DatabaseConnection, household_id: str, cart_id: str, sku: str, contributor_id: str,
     quantity: int, actor_id: str
 ) -> ContributionUpdate:
+    session = checkout_session.current_session(db, household_id, cart_id)
+    if session is not None:
+        in_cart = contribution_quantity(db, cart_id, sku, contributor_id)
+        if quantity < in_cart:
+            raise being_checked_out(db, household_id, session)
+        checkout_session.set_waiting(db, household_id, cart_id, sku, contributor_id, quantity - in_cart)
+        revision = checkout_session.record_waiting_change(db, household_id, cart_id, actor_id)
+        return ContributionUpdate(sku=sku, contributor_id=contributor_id, quantity=quantity, revision=revision)
     set_contribution(db, household_id, cart_id, sku, contributor_id, quantity)
     revision = record_cart_change(db, household_id, cart_id, actor_id)
     return ContributionUpdate(sku=sku, contributor_id=contributor_id, quantity=quantity, revision=revision)
@@ -1303,15 +1570,54 @@ def shared_quantity(db: DatabaseConnection, cart_id: str, sku: str) -> int:
     return row["quantity"]
 
 
+def change_waiting(
+    db: DatabaseConnection, household_id: str, cart_id: str, sku: str, delta: int, caller: Identity,
+    is_primary: bool, session, *, in_cart: int,
+) -> int:
+    """Change what is waiting for the next cart, and return how many units of the product now wait."""
+    rows = [row for row in checkout_session.waiting_rows(db, cart_id) if row["sku"] == sku]
+    total = sum(row["quantity"] for row in rows)
+    if delta > 0:
+        if in_cart + total + delta > MAX_QUANTITY:
+            raise HTTPException(status_code=409, detail="Maximum quantity reached")
+        own = next((row["quantity"] for row in rows if row["contributor_id"] == caller.user_id), 0)
+        checkout_session.set_waiting(db, household_id, cart_id, sku, caller.user_id, own + delta)
+        return total + delta
+    removable = sorted(
+        (row for row in rows if is_primary or row["contributor_id"] == caller.user_id),
+        key=lambda row: (row["contributor_id"] != caller.user_id, row["contributor_id"]),
+    )
+    if not removable:
+        raise being_checked_out(db, household_id, session)
+    remaining = -delta
+    for row in removable:
+        taken = min(remaining, row["quantity"])
+        checkout_session.set_waiting(db, household_id, cart_id, sku, row["contributor_id"], row["quantity"] - taken)
+        remaining -= taken
+        total -= taken
+    return total
+
+
 @app.patch(f"{HOUSEHOLD}/carts/{{cart_id}}/items/{{sku}}")
 def adjust_shared_quantity(
     household_id: str, cart_id: str, sku: SKU, body: AdjustQuantity, request: Request, caller: Caller
 ) -> SharedItemUpdate:
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        # A tap can arrive just after the cart was checked out and replaced.
+        cart_id = checkout_session.open_cart_id(db, cart_id)
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         if body.delta == 0:
             raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
         total = shared_quantity(db, cart_id, sku)
+        session = checkout_session.current_session(db, household_id, cart_id)
+        if session is not None:
+            if body.delta > 0:
+                require_product_for_cart(request, sku, caller, cart)
+            waiting = change_waiting(
+                db, household_id, cart_id, sku, body.delta, caller, is_primary, session, in_cart=total,
+            )
+            revision = checkout_session.record_waiting_change(db, household_id, cart_id, caller.user_id)
+            return SharedItemUpdate(sku=sku, quantity=total + waiting, revision=revision, waiting=True)
         if body.delta > 0:
             require_product_for_cart(request, sku, caller, cart)
             if total + body.delta > MAX_QUANTITY:
@@ -1361,6 +1667,17 @@ def remove_shared_item(
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_visible_cart(db, household_id, cart_id, caller, is_primary)
         require_primary(is_primary)
+        session = checkout_session.current_session(db, household_id, cart_id)
+        if session is not None:
+            waiting = [row for row in checkout_session.waiting_rows(db, cart_id) if row["sku"] == sku]
+            if not waiting:
+                raise being_checked_out(db, household_id, session)
+            for row in waiting:
+                checkout_session.set_waiting(db, household_id, cart_id, sku, row["contributor_id"], 0)
+            revision = checkout_session.record_waiting_change(db, household_id, cart_id, caller.user_id)
+            return SharedItemUpdate(
+                sku=sku, quantity=shared_quantity(db, cart_id, sku), revision=revision, waiting=True,
+            )
         db.execute(
             "DELETE FROM cart_item_contributions WHERE cart_id = ? AND sku = ?",
             (cart_id, sku),
@@ -1390,7 +1707,11 @@ def adjust_quantity(
             raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
         if body.delta > 0:
             require_product_for_cart(request, sku, caller, cart)
-        quantity = max(0, contribution_quantity(db, cart_id, sku, caller.user_id) + body.delta)
+        waiting = next((
+            row["quantity"] for row in checkout_session.waiting_rows(db, cart_id)
+            if row["sku"] == sku and row["contributor_id"] == caller.user_id
+        ), 0)
+        quantity = max(0, contribution_quantity(db, cart_id, sku, caller.user_id) + waiting + body.delta)
         if quantity > MAX_QUANTITY:
             raise HTTPException(status_code=409, detail="Maximum quantity reached")
         return save_quantity(db, household_id, cart_id, sku, caller.user_id, quantity, caller.user_id)
@@ -1457,16 +1778,29 @@ def view_for(
         ],
         "is_adult": caller.is_adult,
         "age_status": age_status,
+        "member_requests": [
+            item for item in snapshot.get("member_requests", [])
+            if (is_primary and item["status"] == "PENDING")
+            or (caller.is_adult and item["requested_by"] == caller.user_id)
+        ],
     }
     if cart_id is None:
         return view
     selected = next((cart for cart in carts if cart.id == cart_id), None)
     if selected is None:
         view["cart"] = None
+        replaced = {cart["id"]: cart.get("next_cart_id") for cart in snapshot["carts"] if cart["deleted"]}
+        following = cart_id
+        while following in replaced:
+            following = replaced[following]
+        if following != cart_id and any(cart.id == following for cart in carts):
+            # Checked out and replaced by a new cart holding what was added meanwhile.
+            view["next_cart_id"] = following
+            view["ordered_by"] = snapshot.get("ordered", {}).get(cart_id) if batch else None
         row = next((cart for cart in snapshot["carts"] if cart["id"] == cart_id and not cart["deleted"]), None)
         if row is not None and not (row["adults_only"] and not caller.is_adult):
             owner = snapshot["owner_name"]
-            view["access_notice"] = f"You no longer have access to this cart. Contact {owner}, the primary account holder."
+            view["access_notice"] = f"You no longer have access to this cart. Contact {owner}, the household admin."
     elif not batch or cart_id in snapshot["changed_carts"]:
         view["actor_id"] = snapshot["actors"].get(cart_id) if batch else None
         view["actor_ids"] = snapshot.get("cart_actors", {}).get(cart_id, []) if batch else []
@@ -1475,6 +1809,8 @@ def view_for(
             **selected.model_dump(),
             "can_delete_cart": selected.can_manage_access,
             "contributions": visible_contributions(connection, caller, snapshot["changed_carts"].get(cart_id, [])),
+            "waiting": visible_contributions(connection, caller, snapshot.get("waiting", {}).get(cart_id, [])),
+            "checkout": snapshot.get("checkouts", {}).get(cart_id),
         }
         if selected.can_manage_access:
             view["grants"] = snapshot_grantees(snapshot, cart_id)

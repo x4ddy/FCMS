@@ -79,13 +79,16 @@ The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_ide
    BEGIN;
    \i supabase/migrations/20261125120000_family_updates.sql
    COMMIT;
+   BEGIN;
+   \i supabase/migrations/20261125150000_checkout_and_roles.sql
+   COMMIT;
    \password familycart_identity
    \password familycart_shopping
    ```
 
    Choose a different generated password for each login. The migration creates the tables and demo household. FamilyCart seeds store inventory on startup. Existing local users and orders stay in their original database.
 
-   An existing project only needs `20261125120000_family_updates.sql`. It can be pasted into the Supabase SQL Editor between `BEGIN;` and `COMMIT;`. Apply it before starting this version. The previous version keeps working after it.
+   An existing project needs each file it has not had yet: `20261125120000_family_updates.sql`, then `20261125150000_checkout_and_roles.sql`. Each can be pasted into the Supabase SQL Editor between `BEGIN;` and `COMMIT;`. Apply them before starting this version. The previous version keeps working after them.
 
 2. For an IPv4 connection, in the Supabase dashboard choose **Connect → Session pooler**. Copy its host and project reference into the root `.env` using the two service logins below. Percent-encode any reserved URL characters in passwords. These settings belong to the backend.
 
@@ -105,7 +108,7 @@ The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_ide
 
 If Windows reports `[Errno 11001] getaddrinfo failed` for the direct database address, run `.\Run-FamilyCart.cmd --connect-db` from the project folder. Sign in through the Supabase CLI when prompted. The launcher retrieves the assigned session pooler, tests both existing service logins on port 5432, and saves the verified hostname for subsequent launches. It uses npx if the Supabase CLI is unavailable.
 
-If the root `.env` already contains direct Supabase URLs, set `FAMILYCART_SESSION_POOLER_HOST` to the hostname from **Connect → Session pooler** to use IPv4. The launcher adds the project reference to each login and preserves its password and TLS settings. Run `.\Run-FamilyCart.cmd --check-db` to verify both service logins and all 28 tables from your machine.
+If the root `.env` already contains direct Supabase URLs, set `FAMILYCART_SESSION_POOLER_HOST` to the hostname from **Connect → Session pooler** to use IPv4. The launcher adds the project reference to each login and preserves its password and TLS settings. Run `.\Run-FamilyCart.cmd --check-db` to verify both service logins and all 31 tables from your machine.
 
 For a one-time transfer, stop the running FamilyCart launcher and start Docker Desktop. Run `.\Run-FamilyCart.cmd --migrate-local` from the project folder. It starts the existing legacy PostgreSQL containers, holds their tables stable, copies the data in dependency order and compares every source row with the hosted copy. It accepts identical rows on retry and reports conflicts with existing hosted data. A fresh demo seed can be updated to match the source. A successful run prints the verified row counts. Then start FamilyCart normally.
 
