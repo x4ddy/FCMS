@@ -685,14 +685,6 @@ function App() {
   }
   const page = showOrderHistory || orderId ? 'orders' : view
   const ready = session && !needsAgeSetup && !restoringSession
-  const tabs = [
-    ['shop', 'Shop', 'home', () => openPage('shop')],
-    ['lists', 'Lists', 'list', () => openPage('lists')],
-    ...(household ? [['addresses', 'Addresses', 'pin', () => openPage('addresses')]] : []),
-    ...(isPrimary || isAdult ? [['orders', 'Orders', 'orders', () => openPage('orders')]] : []),
-    ['household', 'Household', 'people', () => openPage('household')],
-  ]
-
   return <>
     <header className="site-header">
       <div className="header-row shell">
@@ -708,6 +700,8 @@ function App() {
               setQuery(event.target.value)
             }} /></label> : <span className="spacer" />}
         {ready && <>
+          <button className={`icon-button wishlist${page === 'lists' ? ' on' : ''}`} aria-label="Wishlist and shopping lists" title="Wishlist"
+            aria-current={page === 'lists' ? 'page' : undefined} onClick={() => openPage('lists')}><Icon name="heart" /></button>
           <button className="icon-button bell" aria-label={`Activity${unread ? `, ${unread} new` : ''}`} onClick={() => openDrawer('activity')}>
             <Icon name="bell" />{unread > 0 && <span className="badge">{unread > 9 ? '9+' : unread}</span>}</button>
           {household && <button className="cart-button" onClick={() => openDrawer('cart')} aria-label={`Open cart, ${itemCount} ${itemCount === 1 ? 'item' : 'items'}`}>
@@ -720,7 +714,10 @@ function App() {
           <div onClick={(event) => { if (event.target.closest('button')) event.currentTarget.closest('details').open = false }}>
             <strong>{session.user.display_name}</strong>
             {household && <small className="muted">{household.name} · {roleName}</small>}
-            {ready && <>{(isPrimary || isAdult) && <button onClick={() => openPage('orders')}>Order history</button>}
+            {ready && <><button onClick={() => openPage('shop')}>Shop</button>
+              <button onClick={() => openPage('lists')}>Wishlist and lists</button>
+              {household && <button onClick={() => openPage('addresses')}>Addresses</button>}
+              {(isPrimary || isAdult) && <button onClick={() => openPage('orders')}>Order history</button>}
               <button onClick={() => openPage('household')}>{household ? 'Household' : 'Create or join a household'}</button></>}
             <button disabled={busy} onClick={() => run(async () => {
               await flushTaps()
@@ -730,10 +727,6 @@ function App() {
           </div>
         </details> : !restoringSession && <button onClick={() => setAuthOpen(true)}>Login / Register</button>}
       </div>
-      {ready && <nav className="site-nav" aria-label="Main">
-        {tabs.map(([id, label, icon, open]) => <button key={id} aria-current={id === page ? 'page' : undefined} onClick={open}>
-          <Icon name={icon} size={20} /><span>{label}</span></button>)}
-      </nav>}
     </header>
 
     {notices.length > 0 && <div className="cart-activity-stack" role="status" aria-label="Notifications">
@@ -745,6 +738,7 @@ function App() {
     </div>}
 
     <main className="shell">
+      {ready && page !== 'shop' && !needsOwnAddress && <button className="text-button back-to-shop" onClick={() => openPage('shop')}>← Back to shop</button>}
       {ready && pendingOrder && drawer !== 'checkout' && <div className="banner row" role="status">
         <span><strong>Your last order was not confirmed</strong><p>Check whether it went through before ordering again.</p></span>
         <button onClick={() => { setCheckoutCart(pendingOrder.cart); setDrawer('checkout') }}>Resume checkout</button>

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
-import { Avatar, confirmAction, Icon, ProductImage } from './ui.jsx'
+import { Avatar, confirmAction, Dropdown, Icon, ProductImage } from './ui.jsx'
 import {
   applyChanges, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, mergeListUpdate, parsePastedList, parseQuickAdd,
   productSuggestions, queueAdd, queueRemove, queueSet, timeAgo, upsertListSummary,
@@ -378,12 +378,11 @@ function ListDetail({
             chosen.items.length === ready.length ? new Set() : new Set(ready.map((item) => item.id)),
           )}>{chosen.items.length === ready.length ? 'Clear' : 'Select all'}</button>
         </div>
-        <label className="move-target">
+        <div className="move-target">
           <span>Send to</span>
-          <select value={target} onChange={(event) => setTarget(event.target.value)}>
-            {carts.map((cart) => <option key={cart.id} value={cart.id}>{cart.name}</option>)}
-          </select>
-        </label>
+          <Dropdown up label="Send to" value={target} icon="cart" onChange={setTarget}
+            options={carts.map((cart) => ({ value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart', note: cart.adults_only ? 'Adults only' : '' }))} />
+        </div>
         <button disabled={busy || !target || chosen.items.length === 0} onClick={() => {
           onMove(target, chosen.items.map((item) => item.id))
           setChosenIds(new Set())

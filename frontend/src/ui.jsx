@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { avatarHue, initials } from './listState.js'
 
@@ -53,6 +53,71 @@ export function Stepper({ label, quantity, onAdjust, disabled, canRemove = true,
     <button type="button" aria-label={`Add one ${label}`} disabled={disabled || quantity >= 99}
       onClick={() => onAdjust(1)}><Icon name="plus" size={16} /></button>
   </span>
+}
+
+/** A dropdown that matches the app. Options: { value, label, note, icon }. Arrow keys, Enter, Escape and typing work. */
+export function Dropdown({ label, value, options, onChange, icon, up = false, className = '' }) {
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+  const root = useRef(null)
+  const button = useRef(null)
+  const typed = useRef({ text: '', at: 0 })
+  const id = useId()
+  const current = options.find((option) => option.value === value) ?? options[0]
+  useEffect(() => {
+    if (!open) return
+    const away = (event) => { if (!root.current?.contains(event.target)) setOpen(false) }
+    document.addEventListener('pointerdown', away)
+    return () => document.removeEventListener('pointerdown', away)
+  }, [open])
+  useEffect(() => {
+    if (open) root.current?.querySelector('.active')?.scrollIntoView({ block: 'nearest' })
+  }, [open, active])
+  function show() {
+    setActive(Math.max(0, options.indexOf(current)))
+    setOpen(true)
+  }
+  function choose(option) {
+    setOpen(false)
+    button.current?.focus()
+    if (option && option.value !== value) onChange(option.value)
+  }
+  function onKeyDown(event) {
+    const { key } = event
+    if (!open) {
+      if (key === 'ArrowDown' || key === 'ArrowUp') { event.preventDefault(); show() }
+      return
+    }
+    if (key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false) }
+    else if (key === 'Enter' || key === ' ') { event.preventDefault(); choose(options[active]) }
+    else if (key === 'Tab') setOpen(false)
+    else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(key)) {
+      event.preventDefault()
+      setActive((at) => key === 'Home' ? 0 : key === 'End' ? options.length - 1
+        : (at + (key === 'ArrowDown' ? 1 : -1) + options.length) % options.length)
+    } else if (key.length === 1) {
+      const now = Date.now()
+      typed.current = { text: (now - typed.current.at > 700 ? '' : typed.current.text) + key.toLowerCase(), at: now }
+      const found = options.findIndex((option) => option.label.toLowerCase().startsWith(typed.current.text))
+      if (found >= 0) setActive(found)
+    }
+  }
+  return <div className={`dropdown ${className}`} ref={root} onKeyDown={onKeyDown}>
+    <button type="button" className="dropdown-button" ref={button} role="combobox" aria-haspopup="listbox" aria-expanded={open}
+      aria-controls={`${id}-list`} aria-label={`${label}: ${current?.label ?? ''}`} aria-activedescendant={open ? `${id}-${active}` : undefined}
+      onClick={() => open ? setOpen(false) : show()}>
+      {(current?.icon ?? icon) && <Icon name={current?.icon ?? icon} size={18} />}
+      <span className="dropdown-text">{current?.label}</span><Icon name="chevron" size={16} />
+    </button>
+    {open && <ul className={`dropdown-menu${up ? ' up' : ''}`} id={`${id}-list`} role="listbox" aria-label={label}>
+      {options.map((option, index) => <li key={option.value} id={`${id}-${index}`} role="option" aria-selected={option.value === value}
+        className={index === active ? 'active' : ''} onPointerEnter={() => setActive(index)} onClick={() => choose(option)}>
+        {(option.icon ?? icon) && <span className="dropdown-icon"><Icon name={option.icon ?? icon} size={18} /></span>}
+        <span className="dropdown-text"><strong>{option.label}</strong>{option.note && <small>{option.note}</small>}</span>
+        {option.value === value && <Icon name="check" size={18} />}
+      </li>)}
+    </ul>}
+  </div>
 }
 
 const focusable = 'a[href],button:not(:disabled),input:not(:disabled),select:not(:disabled),summary,[tabindex="0"]'

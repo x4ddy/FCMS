@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { AddressBook, AddressForm } from './AddressBook.jsx'
-import { Avatar, confirmAction, Icon } from './ui.jsx'
+import { Avatar, confirmAction, Dropdown, Icon } from './ui.jsx'
 
 function HouseholdSetup({ busy, api, displayName, onCreate, onJoin }) {
   const [name, setName] = useState('')
@@ -126,10 +126,9 @@ export function HouseholdPage({
   return <section className="page">
     <div className="section-head">
       <div><h1>{household.name}</h1><p className="muted">{ROLE_TEXT[roleName]}</p></div>
-      {households.length > 1 && <label className="cart-picker"><span>Active household</span>
-        <select value={household.id} onChange={(event) => onSelectHousehold(event.target.value)}>
-          {households.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select></label>}
+      {households.length > 1 && <div className="cart-picker"><span>Active household</span>
+        <Dropdown label="Active household" value={household.id} icon="home" onChange={onSelectHousehold}
+          options={households.map((item) => ({ value: item.id, label: item.name, note: item.role === 'primary' ? 'Admin' : 'Member' }))} /></div>}
     </div>
     {session.age_status === 'PENDING' && <div className="banner" role="status">
       <strong>Your age is waiting for approval</strong>

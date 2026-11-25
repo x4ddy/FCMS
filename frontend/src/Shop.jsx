@@ -1,5 +1,5 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
-import { Empty, Icon, money, Overlay, ProductImage, Stepper } from './ui.jsx'
+import { Dropdown, Empty, Icon, money, Overlay, ProductImage, Stepper } from './ui.jsx'
 
 const SHELF = 12
 const SORTS = {
@@ -185,10 +185,13 @@ export function ShopPage({
           : 'Create or join a household to start shopping. My lists work already.'}</p>
       </div>
       {!household ? <button onClick={onSetUpHousehold}>Set up household</button>
-        : carts.length > 0 ? <label className="cart-picker"><span>Add products to</span>
-          <select value={shop.cartId ?? ''} onChange={(event) => onSelectCart(event.target.value)}>
-            {carts.map((cart) => <option key={cart.id} value={cart.id}>{cart.name}{cart.adults_only ? ' (18+)' : ''}</option>)}
-          </select></label>
+        : carts.length > 0 ? <div className="cart-picker"><span>Add products to</span>
+          <Dropdown label="Add products to" value={shop.cartId} icon="cart" onChange={onSelectCart}
+            options={carts.map((cart) => ({
+              value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart',
+              note: [cart.adults_only && 'Adults only', cart.id === shop.cartId && (total > 0 ? `${total} ${total === 1 ? 'item' : 'items'}` : 'Empty')]
+                .filter(Boolean).join(' · '),
+            }))} /></div>
           : household.role !== 'primary' && <p className="muted">You have no cart yet. Ask the admin for access.</p>}
     </div>}
 
@@ -216,9 +219,8 @@ export function ShopPage({
       <div className="section-head">
         <h2>{search ? `Results for “${query.trim()}”` : category === 'All' ? 'All products' : category}{' '}
           <small className="muted">{results.length}</small></h2>
-        <select className="sorter" aria-label="Sort products" value={sort} onChange={(event) => setSort(event.target.value)}>
-          {Object.entries(SORTS).map(([id, [label]]) => <option key={id} value={id}>{label}</option>)}
-        </select>
+        <Dropdown className="sorter" label="Sort products" value={sort} onChange={setSort}
+          options={Object.entries(SORTS).map(([id, [label]]) => ({ value: id, label }))} />
       </div>
       {results.length === 0 ? <Empty icon="🔎" title="Nothing matches">
         <p>Try a shorter word, or browse the categories.</p>
