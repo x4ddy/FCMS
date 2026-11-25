@@ -373,7 +373,7 @@ function HouseholdDashboard({
           <section className="panel dashboard-lists">
             <div>
               <h2>Household shopping lists</h2>
-              <p className="muted">Plan together, tick items off, then send the items you choose to a cart.</p>
+              <p className="muted">Plan together, then select items and add them to a cart.</p>
             </div>
             <button onClick={onOpenLists}>Open lists →</button>
           </section>

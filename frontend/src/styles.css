@@ -547,8 +547,9 @@ kbd { padding: .1rem .4rem; border: 1px solid #d5dbd5; border-bottom-width: 2px;
   border-bottom: 3px solid transparent; }
 .list-tabs button:hover:enabled { background: #eef4ec; }
 .list-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.choose-button { min-height: 1.9rem; padding: .15rem .6rem; border-radius: 2rem; font-size: .78rem; white-space: nowrap; }
-.choose-button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+.done-button { min-height: 1.9rem; padding: .15rem .6rem; border-radius: 2rem; font-size: .78rem; white-space: nowrap; }
+.list-check-space { width: 2.75rem; }
+.move-bar button.text-button:disabled { background: transparent; }
 .list-item.chosen { border-color: #2c9a45; background: #f3fbf1; }
 .move-bar .text-button { color: #cfe8d3; text-decoration: underline; padding: 0; justify-self: start; }
 .move-bar .text-button:hover:enabled { background: transparent; color: #fff; }

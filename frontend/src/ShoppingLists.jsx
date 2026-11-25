@@ -55,7 +55,7 @@ function ListsOverview({ mine, lists, loading, busy, onCreate, onOpen }) {
           <p>{mine
             ? 'These lists are private to you. Nobody in your household can see them.'
             : 'Household lists are shared with everyone in your household.'} Jot things down as you think of them,
-            tick them off, then send the items you choose to a household cart.</p>
+            then select items and add them to a household cart.</p>
         </div>
       ) : (
         <ul className="list-grid">
@@ -211,11 +211,13 @@ function ListItemRow({ item, product, chosen, onChoose, onToggle, onQuantity, on
   }
   return (
     <li className={`list-item ${item.checked ? 'checked' : ''} ${item.pending ? 'pending' : ''} ${chosen ? 'chosen' : ''}`}>
-      <label className="list-check">
-        <input type="checkbox" checked={item.checked} onChange={() => onToggle(!item.checked)}
-          aria-label={`${item.checked ? 'Untick' : 'Tick off'} ${label}`} />
+      {/* The circle selects an item for the cart. On a done item it puts the item back on the list. */}
+      {item.checked || onChoose ? <label className="list-check">
+        <input type="checkbox" checked={item.checked || Boolean(chosen)} disabled={item.pending}
+          onChange={() => item.checked ? onToggle(false) : onChoose()}
+          aria-label={item.checked ? `Put ${label} back on the list` : `Select ${label} for the cart`} />
         <span aria-hidden="true" />
-      </label>
+      </label> : <span className="list-check-space" aria-hidden="true" />}
       {product ? <img src={product.image_url} alt="" loading="lazy" />
         : <span className="list-item-placeholder" aria-hidden="true">✎</span>}
       <div className="list-item-body">
@@ -239,10 +241,9 @@ function ListItemRow({ item, product, chosen, onChoose, onToggle, onQuantity, on
         </small>
       </div>
       <div className="list-item-actions">
-        {onChoose && <button className="secondary choose-button" aria-pressed={chosen} disabled={item.pending}
-          aria-label={`${chosen ? 'Do not send' : 'Choose'} ${label} for the cart`} onClick={onChoose}>
-          {chosen ? '✓ Chosen' : 'Choose'}
-        </button>}
+        {!item.checked && <button className="secondary done-button" disabled={item.pending}
+          title="Move to Done without adding it to a cart" aria-label={`Mark ${label} as done`}
+          onClick={() => onToggle(true)}>Mark done</button>}
         {!item.checked && <div className="mini-stepper" aria-label={`Quantity for ${label}`}>
           <button className="secondary" disabled={item.quantity <= 1} aria-label={`One less ${label}`}
             onClick={() => onQuantity(item.quantity - 1)}>−</button>
@@ -373,11 +374,11 @@ function ListDetail({
 
       {ready.length > 0 && canSend && <div className="move-bar" role="region" aria-label="Send to cart">
         <div>
-          <strong>{chosen.items.length} of {ready.length} chosen</strong>
-          <small>{chosen.items.length ? `About ${money.format(chosen.totalFils / 100)}` : 'Choose the items to send'}</small>
+          <strong>{chosen.items.length} of {ready.length} selected</strong>
+          <small>{chosen.items.length ? `About ${money.format(chosen.totalFils / 100)}` : 'Tick the items to add'}</small>
           <button className="text-button" onClick={() => setChosenIds(
             chosen.items.length === ready.length ? new Set() : new Set(ready.map((item) => item.id)),
-          )}>{chosen.items.length === ready.length ? 'Clear' : 'Choose all'}</button>
+          )}>{chosen.items.length === ready.length ? 'Clear' : 'Select all'}</button>
         </div>
         <label className="move-target">
           <span>Send to</span>
