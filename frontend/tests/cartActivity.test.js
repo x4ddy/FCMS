@@ -63,3 +63,18 @@ test('removals in a batch: own removals stay with the owner, others go to the ot
   assert.deepEqual(cartActivity(previous, current, 'viewer', 'primary', names, new Map([['milk', 'Milk'], ['bread', 'Bread']]), both),
     ['Mohan removed 2 × Milk', 'Mohan removed 1 × Bread'])
 })
+
+test('an order is one message to everyone else, not a removal of each item', () => {
+  const previous = [
+    { sku: 'milk', contributor_id: 'member', quantity: 2 },
+    { sku: 'milk', contributor_id: 'primary', quantity: 1 },
+  ]
+  const seen = (viewer, current = [], actors = ['primary']) =>
+    cartActivity(previous, current, viewer, 'primary', names, products, actors, 'primary')
+  assert.deepEqual(seen('member'), ['Priya placed an order'])
+  assert.deepEqual(seen('primary'), [], 'the buyer is not told about their own order')
+  assert.deepEqual(seen('viewer', [{ sku: 'bread', contributor_id: 'member', quantity: 1 }], both),
+    ['Priya placed an order', 'Mohan added 1 × bread'], 'items added afterwards are still reported')
+  assert.deepEqual(cartActivity(previous, [], 'member', 'primary', names, products, ['primary']),
+    ['Priya removed 2 × Milk', 'Priya removed 1 × Milk'], 'real removals are unchanged')
+})

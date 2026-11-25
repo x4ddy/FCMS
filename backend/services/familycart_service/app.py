@@ -302,12 +302,12 @@ def change_cart(
 
 
 def record_cart_change(
-    db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None = None
+    db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None = None, *, reason: str | None = None
 ) -> int:
     notify_changed(db, household_id)
     event = db.execute(
-        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?) RETURNING id",
-        (household_id, cart_id, actor_id),
+        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id, reason) VALUES (?, ?, ?, ?) RETURNING id",
+        (household_id, cart_id, actor_id, reason),
     ).fetchone()
     db.execute(
         """INSERT INTO checkout_cart_revisions (kind, cart_id, revision) VALUES ('household', ?, ?)
@@ -1024,7 +1024,9 @@ def place_order(
             increment_personal_revision(db, state["cart_id"], datetime.now(timezone.utc).isoformat())
         else:
             db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (selection.cart.cart_id,))
-            record_cart_change(db, selection.cart.household_id, selection.cart.cart_id, caller.user_id)
+            record_cart_change(
+                db, selection.cart.household_id, selection.cart.cart_id, caller.user_id, reason="order",
+            )
         return checkout.order_detail(db, order_id, caller.user_id)
 
 
@@ -1468,6 +1470,7 @@ def view_for(
     elif not batch or cart_id in snapshot["changed_carts"]:
         view["actor_id"] = snapshot["actors"].get(cart_id) if batch else None
         view["actor_ids"] = snapshot.get("cart_actors", {}).get(cart_id, []) if batch else []
+        view["ordered_by"] = snapshot.get("ordered", {}).get(cart_id) if batch else None
         view["cart"] = {
             **selected.model_dump(),
             "can_delete_cart": selected.can_manage_access,

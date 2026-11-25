@@ -200,8 +200,8 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual((self.stock(), self.stock(store="uae-al-ain")), (98, 99))
         self.assertEqual(self.cart.get(REGULAR_CART, headers=self.member).json()["contributions"], [])
         with transaction(self.db) as db:
-            event = db.execute("SELECT cart_id, actor_id FROM cart_sync_events ORDER BY id DESC LIMIT 1").fetchone()
-        self.assertEqual(dict(event), {"cart_id": "regular-cart", "actor_id": "user-primary"})
+            event = db.execute("SELECT cart_id, actor_id, reason FROM cart_sync_events ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(dict(event), {"cart_id": "regular-cart", "actor_id": "user-primary", "reason": "order"})
         summary = self.cart.get(f"{API}/orders", headers=self.owner).json()["orders"][0]
         self.assertTrue(summary["is_shared"])
         self.assertEqual(summary["delivery_count"], 2)

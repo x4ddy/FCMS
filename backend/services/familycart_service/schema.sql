@@ -147,6 +147,8 @@ CREATE TABLE IF NOT EXISTS cart_sync_events (
     household_id TEXT NOT NULL,
     cart_id TEXT NOT NULL,
     actor_id TEXT,
+    -- 'order' when checkout emptied the cart, so members are not told items were removed.
+    reason TEXT,
     FOREIGN KEY (household_id, cart_id) REFERENCES carts (household_id, id)
 );
 

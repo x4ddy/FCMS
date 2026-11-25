@@ -137,7 +137,7 @@ def build_snapshots(
         snapshot = snapshots.setdefault(row["household_id"], {
             "household_id": row["household_id"], "owner_id": row["owner_id"],
             "owner_name": "the primary account holder", "revision": None, "members": [],
-            "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "lists": [],
+            "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "ordered": {}, "lists": [],
             "addresses": [],
         })
         fixture = MEMBERS_BY_ID.get(row["user_id"])
@@ -200,7 +200,7 @@ def build_snapshots(
         changed[household].update(cart_ids)
     if include_events:
         for row in db.execute(
-            f"""SELECT id, household_id, cart_id, actor_id FROM cart_sync_events
+            f"""SELECT id, household_id, cart_id, actor_id, reason FROM cart_sync_events
                 WHERE household_id IN ({marks}) ORDER BY id""",
             present,
         ):
@@ -214,6 +214,8 @@ def build_snapshots(
             people = snapshot["cart_actors"].setdefault(row["cart_id"], [])
             if row["actor_id"] and row["actor_id"] not in people:
                 people.append(row["actor_id"])
+            if row["reason"] == "order":
+                snapshot["ordered"][row["cart_id"]] = row["actor_id"]
             snapshot["revision"] = row["id"]
 
     changed_cart_ids = sorted({cart for carts in changed.values() for cart in carts})

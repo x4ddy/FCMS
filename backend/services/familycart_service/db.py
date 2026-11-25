@@ -31,7 +31,7 @@ def initialize_database(path: DatabaseTarget) -> None:
         if db.dialect == "sqlite":
             db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\n{checkout_schema}")
             with db:
-                add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT"})
+                add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT", "reason": "TEXT"})
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
                 # People who were members before age approval existed keep the access they had.
@@ -41,6 +41,7 @@ def initialize_database(path: DatabaseTarget) -> None:
             try:
                 db.execute_script(schema)
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS actor_id TEXT")
+                db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS reason TEXT")
                 for table in ADDRESS_TABLES:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,

@@ -218,6 +218,28 @@ class LiveSyncTests(unittest.TestCase):
                          self.cart["id"], snapshot)
         self.assertEqual(view["actor_ids"], [self.member_id, self.primary_id])
 
+    def test_a_batch_says_when_a_cart_was_emptied_by_an_order(self) -> None:
+        from backend.services.familycart_service.app import record_cart_change
+        from backend.services.familycart_service.db import transaction
+
+        self.client.patch(f"{self.root}/carts/{self.cart['id']}/items/milk", headers=self.member, json={"delta": 1})
+        self.sync.tick()
+        self.fake.published.clear()
+        with transaction(app.state.db_path, write=True) as db:
+            db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (self.cart["id"],))
+            record_cart_change(db, self.household_id, self.cart["id"], self.primary_id, reason="order")
+        self.sync.tick()
+        view = live_view(SimpleNamespace(app=app), self.household_id, Identity(self.member_id, True),
+                         self.cart["id"], self.published_snapshot())
+        self.assertEqual((view["ordered_by"], view["cart"]["contributions"]), (self.primary_id, []))
+        # The next ordinary change is not an order.
+        self.fake.published.clear()
+        self.client.patch(f"{self.root}/carts/{self.cart['id']}/items/milk", headers=self.member, json={"delta": 1})
+        self.sync.tick()
+        view = live_view(SimpleNamespace(app=app), self.household_id, Identity(self.primary_id, True),
+                         self.cart["id"], self.published_snapshot())
+        self.assertIsNone(view["ordered_by"])
+
     def test_in_memory_view_matches_the_database_view(self) -> None:
         adults_only = self.client.post(f"{self.root}/carts", headers=self.primary, json={
             "name": "Party", "adults_only": True,

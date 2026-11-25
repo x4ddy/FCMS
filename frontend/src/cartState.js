@@ -21,22 +21,27 @@ function responsibleFor(contributorId, difference, actorId, actorIds) {
   return others.at(-1) ?? actorId ?? contributorId
 }
 
-export function cartActivity(previous, current, currentUserId, actorId, memberNames, productNames, actorIds = null) {
+export function cartActivity(previous, current, currentUserId, actorId, memberNames, productNames, actorIds = null, orderedBy = null) {
   const before = contributionQuantities(previous)
   const after = contributionQuantities(current)
   const keys = new Set([...before.keys(), ...after.keys()])
 
-  return [...keys].flatMap((key) => {
+  // Checkout empties the cart. That is one order, not a removal of every item.
+  const order = orderedBy && orderedBy !== currentUserId
+    ? [`${memberNames.get(orderedBy) ?? 'A household member'} placed an order`] : []
+  const changes = [...keys].flatMap((key) => {
     const separator = key.indexOf('\u0000')
     const contributorId = key.slice(0, separator)
     const sku = key.slice(separator + 1)
     const difference = (after.get(key) ?? 0) - (before.get(key) ?? 0)
     const responsibleUserId = responsibleFor(contributorId, difference, actorId, actorIds)
+    if (orderedBy && difference < 0) return []
     if (!difference || responsibleUserId === currentUserId) return []
     const person = memberNames.get(responsibleUserId) ?? 'A household member'
     const product = productNames.get(sku) ?? sku
     return [`${person} ${difference > 0 ? 'added' : 'removed'} ${Math.abs(difference)} × ${product}`]
   })
+  return [...order, ...changes]
 }
 
 function mergeContributions(contributions, edits) {

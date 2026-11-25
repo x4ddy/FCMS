@@ -446,7 +446,7 @@ function App() {
   }, [products])
 
   function showCartActivity(messages, cartName) {
-    messages.forEach((message) => showPopup(`${message} in ${cartName}.`))
+    messages.forEach((message) => showPopup(`${message} ${message.endsWith('placed an order') ? 'from' : 'in'} ${cartName}.`))
   }
 
   function showPopup(text, kind = 'activity') {
@@ -576,6 +576,7 @@ function App() {
               memberNames,
               productNames.current,
               snapshot.actor_ids,
+              snapshot.ordered_by,
             ), snapshot.cart.name)
           }
           previousContributions = snapshot.cart.contributions
