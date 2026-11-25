@@ -119,6 +119,12 @@ function addressApi(token, path) {
     deleteAddress: (id) => request(addressPath(id), { token, method: 'DELETE' }),
     updateAddressPin: (id, pin) => request(addressPath(id), { token, method: 'PATCH', body: pin }),
     resolveAddress: (id, signal) => request(`${addressPath(id)}/resolve-store`, { token, method: 'POST', signal }),
+    ...mapsApi(token),
+  }
+}
+
+function mapsApi(token) {
+  return {
     mapStores: (signal) => request(`${api}/maps/stores`, { token, signal }),
     previewPin: (pin, signal) => request(`${api}/maps/resolve`, { token, method: 'POST', body: pin, signal }),
   }
@@ -151,13 +157,13 @@ function listApi(token, lists) {
 export function accountApi(token) {
   if (token) activeAccessToken = token
   return {
-    ...addressApi(token, `${api}/addresses`),
+    ...mapsApi(token),
     households: () => request(`${api}/households`, { token }),
-    createHousehold: (name, displayName) => request(`${api}/households`, {
-      token, method: 'POST', body: { name, display_name: displayName },
+    createHousehold: (name, displayName, address) => request(`${api}/households`, {
+      token, method: 'POST', body: { name, display_name: displayName, address },
     }),
-    acceptInvitation: (invitationCode, displayName) => request(`${api}/household-invitations/accept`, {
-      token, method: 'POST', body: { invitation_code: invitationCode, display_name: displayName },
+    acceptInvitation: (invitationCode, displayName, address) => request(`${api}/household-invitations/accept`, {
+      token, method: 'POST', body: { invitation_code: invitationCode, display_name: displayName, address },
     }),
     ...listApi(token, `${api}/my-lists`),
     products: () => request(`${api}/products`, { token }),
@@ -200,7 +206,6 @@ export function householdApi(token, householdId) {
     }),
     // What this household allows, which depends on whether the primary approved the caller's age.
     products: () => request(`${api}/products?${new URLSearchParams({ household_id: householdId })}`, { token }),
-    shareAddress: (id) => request(`${household}/addresses/share`, { token, method: 'POST', body: { address_id: id } }),
     decideAge: (memberId, approved) => request(`${household}/members/${encodeURIComponent(memberId)}/age`, {
       token, method: 'PUT', body: { approved },
     }),

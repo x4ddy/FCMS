@@ -15,6 +15,9 @@ from backend.services.familycart_service.lists import lists_view
 from backend.shared.database import DatabaseConnection
 from backend.shared.tokens import Identity, issue_token
 
+HOME = {"label": "Home", "recipient_name": "R", "address_line1": "1 Street", "city": "Dubai",
+        "latitude": 25.2, "longitude": 55.27}
+
 
 class FakeRedis:
     """Just enough of Redis for the worker: sets, hashes, plain keys and publish."""
@@ -115,14 +118,14 @@ class LiveSyncTests(unittest.TestCase):
         self.member = self.headers(self.member_id)
         self.child = self.headers(self.child_id, adult=False)
         household = self.client.post("/api/v1/households", headers=self.primary, json={
-            "name": "Live Family", "display_name": "Pat Primary",
+            "name": "Live Family", "display_name": "Pat Primary", "address": HOME,
         }).json()
         self.household_id = household["id"]
         self.root = f"/api/v1/households/{self.household_id}"
         for headers, name in ((self.member, "Morgan Member"), (self.child, "Casey Child")):
             code = self.client.post(f"{self.root}/invitations", headers=self.primary).json()["invitation_code"]
             self.client.post("/api/v1/household-invitations/accept", headers=headers, json={
-                "invitation_code": code, "display_name": name,
+                "invitation_code": code, "display_name": name, "address": HOME,
             })
         self.client.put(f"{self.root}/members/{self.member_id}/age", headers=self.primary, json={"approved": True})
         [self.cart] = self.client.get(f"{self.root}/carts", headers=self.primary).json()
@@ -195,7 +198,8 @@ class LiveSyncTests(unittest.TestCase):
 
         # After: the new primary sees and controls every shared address...
         labels = [entry["label"] for entry in self.client.get(f"{self.root}/addresses", headers=self.member).json()]
-        self.assertEqual(sorted(labels), ["Morgan home", "Pat home"])
+        # Everyone also gave one address when joining.
+        self.assertEqual(sorted(labels), ["Home", "Home", "Home", "Morgan home", "Pat home"])
         self.assertEqual(self.client.patch(path(primary_home), headers=self.member, json=pin).status_code, 200)
         # ...and the previous primary keeps only what any member has: their own addresses.
         self.assertEqual(self.client.patch(path(member_home), headers=self.primary, json=pin).status_code, 403)

@@ -483,10 +483,9 @@ class RoutePolicyTests(unittest.TestCase):
                              ("GET", "orders"), ("POST", f"{h}/lists/l1/items/bulk")):
             self.assertIs(classify(method, path), Level.NORMAL, path)
         for method, path in (("POST", f"{h}/invitations"), ("PUT", f"{h}/carts/c1/grants/m1"), ("DELETE", f"{h}/carts/c1"),
-                             ("POST", "addresses"), ("PATCH", f"{h}/addresses/a1"), ("DELETE", f"{h}/lists/l1"),
+                             ("POST", f"{h}/addresses"), ("PATCH", f"{h}/addresses/a1"), ("DELETE", f"{h}/lists/l1"),
                              ("POST", "checkout/quotes"), ("GET", "something/new"), ("GET", "auth/age")):
             self.assertIs(classify(method, path), Level.SENSITIVE, path)
-        self.assertIs(classify("POST", f"{h}/addresses/share"), Level.SENSITIVE)
         self.assertIs(classify("PUT", f"{h}/members/m1/age"), Level.CRITICAL)
         for method, path in (("DELETE", f"{h}/members/m1"), ("PUT", f"{h}/members/m1/primary"),
                              ("POST", "checkout/orders"), ("POST", "auth/age")):
@@ -516,7 +515,7 @@ class RoutePolicyTests(unittest.TestCase):
             "POST my-lists", "PATCH my-lists/{list_id}", "POST my-lists/{list_id}/items", "POST my-lists/{list_id}/items/bulk",
             "POST my-lists/{list_id}/items/clear-checked", "POST my-lists/{list_id}/move-to-cart",
             "PATCH my-lists/{list_id}/items/{item_id}", "DELETE my-lists/{list_id}/items/{item_id}",
-            "POST addresses/{address_id}/resolve-store", f"POST {h}/addresses/{{address_id}}/resolve-store",
+            f"POST {h}/addresses/{{address_id}}/resolve-store",
         })
 
     def test_paths_that_could_mean_another_route_are_refused(self):
@@ -554,7 +553,7 @@ class GatewayHttpTests(unittest.TestCase):
         self.headers = {"Authorization": f"Bearer {self.tokens.access_token}"}
 
     def test_redis_down_uses_the_database(self):
-        for method, path in (("GET", "products"), ("POST", "addresses"), ("DELETE", "households/h/members/m")):
+        for method, path in (("GET", "products"), ("POST", "households/h/addresses"), ("DELETE", "households/h/members/m")):
             self.assertEqual(self.client.request(method, f"/api/v1/{path}", headers=self.headers).status_code, 200)
 
     def test_both_down_is_503_and_nothing_is_forwarded(self):

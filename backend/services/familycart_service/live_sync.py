@@ -37,7 +37,7 @@ from backend.shared.cache import CACHE_PREFIX, Breaker, sync_client
 from backend.shared.database import DatabaseConnection, DatabaseTarget, database_error_types
 from backend.shared.demo_members import MEMBERS_BY_ID
 
-from .db import ADDRESS_FIELDS, ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, transaction
+from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, transaction
 
 logger = logging.getLogger(__name__)
 SYNC_ERRORS = (RedisError,) + database_error_types()
@@ -161,8 +161,8 @@ def build_snapshots(
     marks = _placeholders(present)
 
     for row in db.execute(
-        f"""SELECT household_id, {ADDRESS_FIELDS}, created_by, source_address_id FROM household_addresses
-            WHERE household_id IN ({marks}) ORDER BY created_at, id""",
+        f"""SELECT household_id, {ADDRESS_FIELDS}, created_by FROM household_addresses
+            WHERE household_id IN ({marks}) AND {ACTIVE_ADDRESS} ORDER BY created_at, id""",
         present,
     ):
         address = dict(row)

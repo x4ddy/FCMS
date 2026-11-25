@@ -9,9 +9,11 @@ SQL_DIR = Path(__file__).parent
 ADDRESS_TABLES = ("user_addresses", "household_addresses")
 ADDRESS_FIELDS = "id, label, recipient_name, address_line1, address_line2, city, postal_code, phone, latitude, longitude"
 
-# One shared copy of a personal address per household. Created after the column migration.
-SHARED_ADDRESS_INDEX = """CREATE UNIQUE INDEX IF NOT EXISTS household_addresses_source_idx
-    ON household_addresses (household_id, source_address_id) WHERE source_address_id IS NOT NULL"""
+# A household address belongs to the member who added it, and only counts while they are a member.
+# The member sees their own; the current primary sees everybody's.
+ACTIVE_ADDRESS = """EXISTS (SELECT 1 FROM household_members AS owner
+    WHERE owner.household_id = household_addresses.household_id
+      AND owner.user_id = household_addresses.created_by AND owner.active = 1)"""
 
 
 def database_target() -> DatabaseTarget:
@@ -32,10 +34,8 @@ def initialize_database(path: DatabaseTarget) -> None:
                 add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT"})
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
-                add_sqlite_columns(db, "household_addresses", {"source_address_id": "TEXT"})
                 # People who were members before age approval existed keep the access they had.
                 add_sqlite_columns(db, "household_member_profiles", {"age_status": "TEXT NOT NULL DEFAULT 'APPROVED'"})
-                db.execute(SHARED_ADDRESS_INDEX)
         else:
             db.execute("BEGIN")
             try:
@@ -45,10 +45,8 @@ def initialize_database(path: DatabaseTarget) -> None:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
                         ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION""")
-                db.execute("ALTER TABLE household_addresses ADD COLUMN IF NOT EXISTS source_address_id TEXT")
                 db.execute("""ALTER TABLE household_member_profiles
                     ADD COLUMN IF NOT EXISTS age_status TEXT NOT NULL DEFAULT 'APPROVED'""")
-                db.execute(SHARED_ADDRESS_INDEX)
                 db.execute_script(seed)
                 db.execute_script(checkout_schema)
             except Exception:

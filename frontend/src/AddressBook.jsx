@@ -145,7 +145,7 @@ function PinCoverage({ api, fields, onChange, addressId, busy, emptyMessage = 'A
   </div>
 }
 
-function AddressForm({ busy, displayName, api, onSave, buttonLabel }) {
+export function AddressForm({ busy, displayName, api, onSave, buttonLabel }) {
   const initialAddress = () => ({
     label: 'Home', recipient_name: displayName, address_line1: '', address_line2: '',
     city: '', postal_code: '', phone: '',
@@ -242,7 +242,7 @@ function SavedAddressMap({ address, api, canEdit, busy, onUpdatePin, onClose }) 
 }
 
 export function AddressBook({ addresses, api, displayName, busy, onSave, onDelete, onUpdatePin,
-  canEdit = () => true, buttonLabel = 'Save address', extraAction }) {
+  canEdit = () => true, buttonLabel = 'Save address', ownerName }) {
   const [selectedId, setSelectedId] = useState(null)
   return <>
     <AddressForm api={api} busy={busy} displayName={displayName} onSave={onSave} buttonLabel={buttonLabel} />
@@ -251,14 +251,13 @@ export function AddressBook({ addresses, api, displayName, busy, onSave, onDelet
       const editable = canEdit(address)
       return <li key={address.id}>
         <div className="address-card-heading">
-          <div><strong>{address.label}</strong><span>{address.recipient_name}</span>
+          <div><strong>{address.label}</strong>{ownerName && <span className="address-owner">{ownerName(address)}</span>}<span>{address.recipient_name}</span>
             <small>{address.address_line1}{address.address_line2 && `, ${address.address_line2}`}, {address.city}</small></div>
           <div className="address-actions">
             <button type="button" className="secondary" disabled={busy} aria-expanded={selected}
               onClick={() => setSelectedId(selected ? null : address.id)}>
               {address.latitude == null && editable ? 'Add map pin' : 'Check coverage'}
             </button>
-            {extraAction?.(address)}
             {onDelete && editable && <button className="secondary danger" disabled={busy}
               onClick={() => onDelete(address.id)}>Remove</button>}
           </div>

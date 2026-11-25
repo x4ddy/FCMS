@@ -69,7 +69,6 @@ CREATE TABLE IF NOT EXISTS household_addresses (
     phone TEXT,
     latitude DOUBLE PRECISION,
     longitude DOUBLE PRECISION,
-    source_address_id TEXT,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,

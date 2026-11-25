@@ -53,11 +53,13 @@ class FamilyCase(unittest.TestCase):
         return response.json() if response.content else None
 
     def household(self, headers, name):
-        return "/households/" + self.call("POST", "/households", headers, 201, name=f"{name} home", display_name=name)["id"]
+        return "/households/" + self.call("POST", "/households", headers, 201, name=f"{name} home", display_name=name,
+                                          address=self.address(name))["id"]
 
     def join(self, root, primary, headers, name, status=200):
         code = self.call("POST", f"{root}/invitations", primary, 201)["invitation_code"]
-        return self.call("POST", "/household-invitations/accept", headers, status, invitation_code=code, display_name=name)
+        return self.call("POST", "/household-invitations/accept", headers, status, invitation_code=code, display_name=name,
+                         address=self.address(name))
 
     def members(self):
         return {row["id"]: row for row in self.call("GET", f"{self.root}/members?include_roles=true", self.p)}
@@ -163,8 +165,6 @@ class AgeApprovalTests(FamilyCase):
             path = Path(folder) / "old.sqlite3"
             initialize_database(path)
             with closing(sqlite3.connect(path)) as raw:
-                raw.execute("DROP INDEX household_addresses_source_idx")
-                raw.execute("ALTER TABLE household_addresses DROP COLUMN source_address_id")
                 raw.execute("CREATE TABLE keep AS SELECT household_id, user_id, display_name, is_adult FROM household_member_profiles")
                 raw.execute("DROP TABLE household_member_profiles")
                 raw.execute("ALTER TABLE keep RENAME TO household_member_profiles")
@@ -176,56 +176,73 @@ class AgeApprovalTests(FamilyCase):
                 self.assertEqual({row["age_status"] for row in db.execute("SELECT age_status FROM household_member_profiles")}, {"APPROVED"})
 
 
-class SharedAddressTests(FamilyCase):
-    def test_sharing_is_one_copy_that_follows_the_original(self):
-        mine = self.call("POST", "/addresses", self.m, 201, **self.address())
-        shared = self.call("POST", f"{self.root}/addresses/share", self.m, 201, address_id=mine["id"])
-        again = self.call("POST", f"{self.root}/addresses/share", self.m, 201, address_id=mine["id"])
-        self.assertEqual(shared, again)
-        self.assertEqual((shared["source_address_id"], shared["created_by"]), (mine["id"], "m"))
-        self.assertEqual([row["label"] for row in self.call("GET", f"{self.root}/addresses", self.p)], ["Home"])
+class FamilyAddressTests(FamilyCase):
+    def labels(self, headers):
+        return sorted(row["label"] for row in self.call("GET", f"{self.root}/addresses", headers))
 
+    def test_nobody_creates_or_joins_without_an_address(self):
+        code = self.call("POST", f"{self.root}/invitations", self.p, 201)["invitation_code"]
+        x = self.h("x")
+        self.call("POST", "/households", x, 422, name="X", display_name="X")
+        self.call("POST", "/household-invitations/accept", x, 422, invitation_code=code, display_name="X")
+        self.call("POST", "/household-invitations/accept", x, 422, invitation_code=code, display_name="X", address={"label": "Home"})
+        self.assertEqual(self.call("GET", "/households", x), [])
+        self.call("POST", "/household-invitations/accept", x, invitation_code=code, display_name="X", address=self.address("X home"))
+        self.assertEqual(self.labels(x), ["X home"])
+
+    def test_members_see_their_own_and_the_primary_sees_all(self):
+        self.call("POST", f"{self.root}/addresses", self.m, 201, **self.address("Office"))
+        self.assertEqual(self.labels(self.m), ["Morgan", "Office"])
+        self.assertEqual(self.labels(self.c), ["Casey"])
+        self.assertEqual(self.labels(self.p), ["Casey", "Morgan", "Office", "Pat"])
+        theirs = self.call("GET", f"{self.root}/addresses", self.p)
+        morgan = next(row["id"] for row in theirs if row["label"] == "Morgan")
+        self.call("POST", f"{self.root}/addresses/{morgan}/resolve-store", self.c, 404)
+        self.call("DELETE", f"{self.root}/addresses/{morgan}", self.c, 403)
+
+    def test_the_view_moves_with_ownership(self):
+        self.decide("m", True)
+        self.call("PUT", f"{self.root}/members/m/primary", self.p)
+        self.assertEqual(self.labels(self.m), ["Casey", "Morgan", "Pat"])
+        self.assertEqual(self.labels(self.p), ["Pat"])
+        live = lambda user: sorted(row["label"] for row in self.live(user)["addresses"])
+        self.assertEqual((live("m"), live("p")), (["Casey", "Morgan", "Pat"], ["Pat"]))
+
+    def test_live_updates_show_each_viewer_only_what_they_may_see(self):
         self.changed.clear()
-        self.call("PATCH", f"/addresses/{mine['id']}", self.m, latitude=24.5, longitude=54.4)
-        [row] = self.call("GET", f"{self.root}/addresses", self.p)
-        self.assertEqual((row["latitude"], len(self.changed)), (24.5, 1))
-
-        self.changed.clear()
-        self.call("DELETE", f"/addresses/{mine['id']}", self.m, 204)
-        self.assertEqual(self.call("GET", f"{self.root}/addresses", self.p), [])
-        self.assertEqual(len(self.changed), 1)
-
-    def test_stopping_sharing_keeps_the_personal_address(self):
-        mine = self.call("POST", "/addresses", self.m, 201, **self.address())
-        shared = self.call("POST", f"{self.root}/addresses/share", self.m, 201, address_id=mine["id"])
-        self.call("DELETE", f"{self.root}/addresses/{shared['id']}", self.m, 204)
-        self.assertEqual(len(self.call("GET", "/addresses", self.m)), 1)
-        self.call("POST", f"{self.root}/addresses/share", self.m, 201, address_id=mine["id"])
-
-    def test_only_your_own_address_and_only_your_household(self):
-        mine = self.call("POST", "/addresses", self.m, 201, **self.address())
-        self.call("POST", f"{self.root}/addresses/share", self.p, 404, address_id=mine["id"])
-        self.call("POST", f"{self.root}/addresses/share", self.h("stranger"), 404, address_id=mine["id"])
-
-    def test_every_shared_address_change_reaches_other_screens(self):
-        added = self.call("POST", f"{self.root}/addresses", self.p, 201, **self.address("Flat"))
-        self.assertEqual([row["label"] for row in self.live("m")["addresses"]], ["Flat"])
-        self.call("PATCH", f"{self.root}/addresses/{added['id']}", self.p, latitude=24.0, longitude=54.0)
-        self.assertEqual(self.live("m")["addresses"][0]["latitude"], 24.0)
+        added = self.call("POST", f"{self.root}/addresses", self.m, 201, **self.address("Flat"))
+        self.call("PATCH", f"{self.root}/addresses/{added['id']}", self.m, latitude=24.0, longitude=54.0)
+        live = lambda user: sorted(row["label"] for row in self.live(user)["addresses"])
+        self.assertEqual((live("p"), live("m"), live("c")), (["Casey", "Flat", "Morgan", "Pat"], ["Flat", "Morgan"], ["Casey"]))
         self.call("DELETE", f"{self.root}/addresses/{added['id']}", self.p, 204)
-        self.assertEqual(self.live("m")["addresses"], [])
-        self.assertEqual(len(self.changed), 3, "each change announces the household")
+        self.assertEqual(live("m"), ["Morgan"])
+        self.assertEqual(len(self.changed), 3)
 
-    def test_private_addresses_never_enter_a_snapshot(self):
-        self.call("POST", "/addresses", self.m, 201, **self.address("Secret"))
-        self.assertNotIn("Secret", str(self.snapshot()))
+    def test_the_last_address_cannot_be_removed(self):
+        for headers in (self.m, self.p):
+            mine = next(row for row in self.call("GET", f"{self.root}/addresses", self.p) if row["created_by"] == "m")
+            self.call("DELETE", f"{self.root}/addresses/{mine['id']}", headers, 409)
+        self.call("POST", f"{self.root}/addresses", self.m, 201, **self.address("New"))
+        self.call("DELETE", f"{self.root}/addresses/{mine['id']}", self.m, 204)
+        self.assertEqual(self.labels(self.m), ["New"])
 
-    def test_a_socket_is_sent_address_changes_even_when_no_cart_changed(self):
-        snapshot = self.snapshot()
-        snapshot["revision"] = None
-        view = live_view(SimpleNamespace(app=app), "x", Identity("m", True), None, snapshot)
-        self.assertIn("addresses", view)
-        self.assertNotIn("cart", view, "so the browser leaves the cart alone")
+    def test_a_removed_members_addresses_go_with_them(self):
+        self.call("DELETE", f"{self.root}/members/m", self.p, 204)
+        self.assertEqual(self.labels(self.p), ["Casey", "Pat"])
+        self.assertNotIn("Morgan", [row["label"] for row in self.snapshot()["addresses"]])
+
+    def test_addresses_stay_inside_their_household(self):
+        other = self.household(self.m, "Elsewhere")
+        self.assertEqual([row["label"] for row in self.call("GET", f"{other}/addresses", self.m)], ["Elsewhere"])
+        self.assertNotIn("Elsewhere", self.labels(self.p))
+
+    def test_personal_addresses_are_not_reachable_through_the_gateway(self):
+        from fastapi import HTTPException
+
+        from backend.api_gateway.app import _target_for
+        for path in ("addresses", "addresses/x", "addresses/x/resolve-store"):
+            with self.assertRaises(HTTPException):
+                _target_for(path, None)
 
 
 class MyListTests(FamilyCase):

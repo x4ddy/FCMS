@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.services.maps_service.app import STORES
 from backend.shared.database import DatabaseConnection
 
-from .db import ADDRESS_FIELDS, active_member, load_carts, load_contributions, lock_household, personal_cart
+from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, load_carts, load_contributions, lock_household, personal_cart
 
 
 class CheckoutInput(BaseModel):
@@ -112,8 +112,10 @@ def saved_address(db, reference, address, user_id: str, *, lock: bool) -> dict:
         ("household_addresses", "household_id", reference.household_id)
     )
     row_lock = " FOR SHARE" if lock and db.dialect == "postgresql" else ""
+    # An address leaves with the member who added it.
+    active = f" AND {ACTIVE_ADDRESS}" if address.kind == "household" else ""
     row = db.execute(
-        f"SELECT {ADDRESS_FIELDS}, updated_at FROM {table} WHERE id = ? AND {ownership} = ?" + row_lock,
+        f"SELECT {ADDRESS_FIELDS}, updated_at FROM {table} WHERE id = ? AND {ownership} = ?" + active + row_lock,
         (address.address_id, owner),
     ).fetchone()
     if row is None:

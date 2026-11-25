@@ -189,7 +189,6 @@ routes refuse it at once. With Redis down the database decides; with both down t
 | Reopen an order confirmation | `GET /api/v1/orders/{order_id}` |
 | Revoke a household member | `DELETE /api/v1/households/{household_id}/members/{member_id}` |
 | Private lists (My lists) | `GET/POST /api/v1/my-lists` and `/api/v1/my-lists/{list_id}/...` |
-| Share one of your addresses | `POST /api/v1/households/{household_id}/addresses/share` |
 | Approve or reject a member's age | `PUT /api/v1/households/{household_id}/members/{member_id}/age` |
 | Shared shopping lists | `GET/POST /api/v1/households/{household_id}/lists` |
 | Read, rename, or delete a list | `GET/PATCH/DELETE /api/v1/households/{household_id}/lists/{list_id}` |

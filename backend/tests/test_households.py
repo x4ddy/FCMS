@@ -11,6 +11,9 @@ from fastapi.testclient import TestClient
 from backend.services.familycart_service.app import app, live_view
 from backend.shared.tokens import Identity, issue_token
 
+HOME = {"label": "Home", "recipient_name": "R", "address_line1": "1 Street", "city": "Dubai",
+        "latitude": 25.2, "longitude": 55.27}
+
 
 class HouseholdAccountTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -31,7 +34,7 @@ class HouseholdAccountTests(unittest.TestCase):
         primary = self.headers("new-primary")
         member = self.headers("new-member")
         created = self.client.post("/api/v1/households", headers=primary, json={
-            "name": "New Family", "display_name": "Primary User",
+            "name": "New Family", "display_name": "Primary User", "address": HOME,
         })
         self.assertEqual(created.status_code, 201)
         household = created.json()
@@ -40,13 +43,13 @@ class HouseholdAccountTests(unittest.TestCase):
 
         invitation = self.client.post(f"{root}/invitations", headers=primary).json()
         accepted = self.client.post("/api/v1/household-invitations/accept", headers=member, json={
-            "invitation_code": invitation["invitation_code"], "display_name": "Invited User",
+            "invitation_code": invitation["invitation_code"], "display_name": "Invited User", "address": HOME,
         })
         self.assertEqual(accepted.status_code, 200)
         self.assertEqual(accepted.json()["id"], household["id"])
         self.assertEqual(
             self.client.post("/api/v1/household-invitations/accept", headers=self.headers("replay"), json={
-                "invitation_code": invitation["invitation_code"], "display_name": "Replay User",
+                "invitation_code": invitation["invitation_code"], "display_name": "Replay User", "address": HOME,
             }).status_code,
             400,
         )
@@ -78,12 +81,12 @@ class HouseholdAccountTests(unittest.TestCase):
         primary = self.headers("address-primary")
         member = self.headers("address-member", adult=False)
         household = self.client.post("/api/v1/households", headers=primary, json={
-            "name": "Address Family", "display_name": "Address Primary",
+            "name": "Address Family", "display_name": "Address Primary", "address": HOME,
         }).json()
         root = f"/api/v1/households/{household['id']}"
         code = self.client.post(f"{root}/invitations", headers=primary).json()["invitation_code"]
         self.client.post("/api/v1/household-invitations/accept", headers=member, json={
-            "invitation_code": code, "display_name": "Address Member",
+            "invitation_code": code, "display_name": "Address Member", "address": HOME,
         })
         created = self.client.post(f"{root}/addresses", headers=member, json={
             "label": "Home", "recipient_name": "Address Member", "address_line1": "12 Market Road",
@@ -91,9 +94,10 @@ class HouseholdAccountTests(unittest.TestCase):
         })
         self.assertEqual(created.status_code, 201)
         address_id = created.json()["id"]
-        self.assertEqual(len(self.client.get(f"{root}/addresses", headers=primary).json()), 1)
+        # The primary sees everyone's; the member only their own two.
+        self.assertEqual(len(self.client.get(f"{root}/addresses", headers=primary).json()), 3)
         self.assertEqual(self.client.delete(f"{root}/addresses/{address_id}", headers=primary).status_code, 204)
-        self.assertEqual(self.client.get(f"{root}/addresses", headers=member).json(), [])
+        self.assertEqual(len(self.client.get(f"{root}/addresses", headers=member).json()), 1)
 
     def test_personal_carts_are_isolated_per_user(self) -> None:
         first = self.headers("personal-one")
@@ -114,10 +118,10 @@ class HouseholdAccountTests(unittest.TestCase):
     def test_primary_can_create_multiple_households_and_multiple_carts(self) -> None:
         primary = self.headers("multi-primary")
         first = self.client.post("/api/v1/households", headers=primary, json={
-            "name": "First Family", "display_name": "Multi Primary",
+            "name": "First Family", "display_name": "Multi Primary", "address": HOME,
         })
         second = self.client.post("/api/v1/households", headers=primary, json={
-            "name": "Second Family", "display_name": "Multi Primary",
+            "name": "Second Family", "display_name": "Multi Primary", "address": HOME,
         })
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 201)
@@ -165,12 +169,12 @@ class HouseholdAccountTests(unittest.TestCase):
         primary = self.headers("transfer-primary")
         successor = self.headers("transfer-successor")
         household = self.client.post("/api/v1/households", headers=primary, json={
-            "name": "Transfer Family", "display_name": "Original Primary",
+            "name": "Transfer Family", "display_name": "Original Primary", "address": HOME,
         }).json()
         root = f"/api/v1/households/{household['id']}"
         code = self.client.post(f"{root}/invitations", headers=primary).json()["invitation_code"]
         accepted = self.client.post("/api/v1/household-invitations/accept", headers=successor, json={
-            "invitation_code": code, "display_name": "New Primary",
+            "invitation_code": code, "display_name": "New Primary", "address": HOME,
         })
         self.assertEqual(accepted.status_code, 200)
         [cart] = self.client.get(f"{root}/carts", headers=primary).json()

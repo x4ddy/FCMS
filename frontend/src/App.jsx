@@ -5,7 +5,7 @@ import {
   refreshAccessToken, restoreSession, signInWithGoogle,
 } from './api.js'
 import { CartDetail } from './CartDetail.jsx'
-import { AddressBook } from './AddressBook.jsx'
+import { AddressBook, AddressForm } from './AddressBook.jsx'
 import { ListsPage } from './ShoppingLists.jsx'
 import { applyCartSnapshot, cartActivity } from './cartState.js'
 import { Checkout, OrderConfirmation } from './Checkout.jsx'
@@ -213,60 +213,72 @@ function GroceryPage({
   )
 }
 
-function HouseholdSetup({ busy, displayName, onCreate, onJoin }) {
+function HouseholdSetup({ busy, api, displayName, onCreate, onJoin }) {
   const [name, setName] = useState('')
   const [code, setCode] = useState('')
+  // Nobody joins or creates a household without giving one delivery address.
+  const [step, setStep] = useState(null)
+  if (step) return (
+    <section className="panel dashboard-addresses">
+      <button className="text-button" disabled={busy} onClick={() => setStep(null)}>← Back</button>
+      <h2>Your delivery address</h2>
+      <p className="muted">{step === 'create'
+        ? `One address is needed to create ${name}. You can add more later.`
+        : 'One address is needed to join. You and the primary account holder can see it.'}</p>
+      <AddressForm api={api} busy={busy} displayName={displayName}
+        buttonLabel={step === 'create' ? 'Save and create household' : 'Save and join household'}
+        onSave={(address) => step === 'create' ? onCreate(name.trim(), address) : onJoin(code.trim(), address)} />
+    </section>
+  )
   return (
     <div className="setup-grid">
       <form className="panel" onSubmit={(event) => {
         event.preventDefault()
-        onCreate(name)
+        if (name.trim()) setStep('create')
       }}>
         <h2>Create a household</h2>
-        <p className="muted">Start a shared account for carts, members, and delivery addresses.</p>
+        <p className="muted">Start a shared account for carts, lists, members, and delivery addresses.</p>
         <label>Household name<input required maxLength="100" placeholder="The Sharma Family"
           value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <button disabled={busy || !name.trim()}>Create household</button>
+        <button disabled={busy || !name.trim()}>Next: your address</button>
       </form>
       <form className="panel" onSubmit={(event) => {
         event.preventDefault()
-        onJoin(code, displayName)
+        if (code.trim()) setStep('join')
       }}>
         <h2>Join a household</h2>
         <p className="muted">Paste the private invitation code shared by a household primary.</p>
-        <label>Invitation code<input required maxLength="200" placeholder="Paste invitation code"
+        <label>Invitation code<input required minLength="20" maxLength="200" placeholder="Paste invitation code"
           value={code} onChange={(event) => setCode(event.target.value)} /></label>
-        <button disabled={busy || !code.trim()}>Join household</button>
+        <button disabled={busy || !code.trim()}>Next: your address</button>
       </form>
     </div>
   )
 }
 
-function PersonalAddresses({ required = false, onBack, household, sharedAddresses = [], onShare, onStopSharing, ...addressBook }) {
-  const shareAction = household && onShare ? (address) => {
-    const shared = sharedAddresses.find((other) => other.source_address_id === address.id)
-    return shared
-      ? <button type="button" className="secondary" disabled={addressBook.busy} onClick={() => onStopSharing(shared.id)}>Stop sharing</button>
-      : <button type="button" disabled={addressBook.busy} onClick={() => onShare(address.id)}>Share with {household.name}</button>
-  } : undefined
+function FamilyAddresses({ required = false, household, userId, members, onBack, addresses, ...addressBook }) {
+  const isPrimary = household.role === 'primary'
+  const name = (id) => id === userId ? 'You' : members.find((member) => member.id === id)?.display_name ?? 'Member'
   return <section className="household-dashboard">
     <div className="page-heading"><div>
-      {!required && <button className="text-button" onClick={onBack}>Back to groceries</button>}
-      <h1>{required ? 'Add your delivery address' : 'Your addresses'}</h1>
-      <p className="muted">{required
-        ? 'A delivery address is required before you start shopping.'
-        : 'Private to you. Share one to let your household deliver to it.'}</p>
+      {!required && <button className="text-button" onClick={onBack}>← Back to groceries</button>}
+      <h1>{required ? 'Add your delivery address' : isPrimary ? 'Family addresses' : 'My addresses'}</h1>
+      <p className="muted">{required ? `Everyone in ${household.name} needs at least one address.`
+        : isPrimary ? 'As the primary account holder, you can see every member’s addresses.'
+          : 'You and the primary account holder can see these.'}</p>
     </div></div>
     <section className="panel dashboard-addresses">
-      <AddressBook {...addressBook} extraAction={shareAction} buttonLabel={required ? 'Save and start shopping' : 'Add address'} />
+      <AddressBook {...addressBook} addresses={required ? [] : addresses} displayName={addressBook.displayName}
+        ownerName={isPrimary ? (address) => name(address.created_by) : undefined}
+        buttonLabel={required ? 'Save and continue' : 'Add address'} />
     </section>
   </section>
 }
 
 function HouseholdDashboard({
-  household, households, session, carts, members, addresses, busy, invitation, onBack, onCreate,
-  onJoin, onSelectHousehold, onInvite, onRevoke, onDecideAge, onTransferHousehold, onAddress,
-  onDeleteAddress, onUpdatePin, addressApi, onOpenCart, onShopCart, onCreateCart, onDeleteCart, onOpenLists,
+  household, households, session, account, carts, members, addresses, busy, invitation, onBack, onCreate,
+  onJoin, onSelectHousehold, onInvite, onRevoke, onDecideAge, onTransferHousehold,
+  onOpenAddresses, onOpenCart, onShopCart, onCreateCart, onDeleteCart, onOpenLists,
 }) {
   const [cartName, setCartName] = useState('')
   const [adultsOnly, setAdultsOnly] = useState(false)
@@ -284,7 +296,7 @@ function HouseholdDashboard({
         {household && <span className="role-badge">{household.role}</span>}
       </div>
       {!household ? (
-        <HouseholdSetup busy={busy} displayName={session.user.display_name} onCreate={onCreate} onJoin={onJoin} />
+        <HouseholdSetup api={account} busy={busy} displayName={session.user.display_name} onCreate={onCreate} onJoin={onJoin} />
       ) : (
         <div className="dashboard-grid">
           {session.age_status === 'PENDING' && <div className="age-banner" role="status"><div>
@@ -365,15 +377,17 @@ function HouseholdDashboard({
             </div>
             <button onClick={onOpenLists}>Open lists →</button>
           </section>
-          <section className="panel dashboard-addresses">
-            <h2>Shared delivery addresses</h2>
-            <AddressBook key={household.id} addresses={addresses} api={addressApi} busy={busy}
-              displayName={session.user.display_name} onSave={onAddress} onDelete={onDeleteAddress}
-              onUpdatePin={onUpdatePin} canEdit={(address) => household.role === 'primary' || address.created_by === session.user.id} />
+          <section className="panel dashboard-lists">
+            <div>
+              <h2>{household.role === 'primary' ? 'Family addresses' : 'My addresses'}</h2>
+              <p className="muted">{addresses.length} saved. {household.role === 'primary'
+                ? 'You can see every member’s addresses.' : 'You and the primary account holder can see yours.'}</p>
+            </div>
+            <button onClick={onOpenAddresses}>Open addresses →</button>
           </section>
           <details className="panel household-more">
             <summary>Create or join another household</summary>
-            <HouseholdSetup busy={busy} displayName={session.user.display_name}
+            <HouseholdSetup key={household.id} api={account} busy={busy} displayName={session.user.display_name}
               onCreate={onCreate} onJoin={onJoin} />
           </details>
         </div>
@@ -401,7 +415,6 @@ function App() {
   const [products, setProducts] = useState([])
   const [members, setMembers] = useState([])
   const [addresses, setAddresses] = useState([])
-  const [personalAddresses, setPersonalAddresses] = useState([])
   const [quantities, setQuantities] = useState({})
   const [invitation, setInvitation] = useState(null)
   const [detail, setDetail] = useState(null)
@@ -448,7 +461,7 @@ function App() {
   function clearSession() {
     currentUser.current = null
     setSession(null); setHousehold(null); setHouseholds([]); setCarts([]); setProducts([]); setMembers([])
-    setAddresses([]); setPersonalAddresses([]); setQuantities({}); setInvitation(null); setDetail(null); setShoppingCartId(null)
+    setAddresses([]); setQuantities({}); setInvitation(null); setDetail(null); setShoppingCartId(null)
     setCheckoutCart(null); setPendingOrder(null); setConfirmation(null); setOrderError(null)
     setCartNotices([]); setView('shop')
   }
@@ -494,16 +507,12 @@ function App() {
       return
     }
     const signedInAccount = accountApi(signedIn.access_token)
-    const [visibleHouseholds, savedPersonalAddresses] = await Promise.all([
-      signedInAccount.households(), signedInAccount.addresses(),
-    ])
+    const visibleHouseholds = await signedInAccount.households()
     currentUser.current = signedIn.user.id
     setSession(signedIn)
     setHouseholds(visibleHouseholds)
-    setPersonalAddresses(savedPersonalAddresses)
     setPendingOrder(readAttempt(signedIn.user.id))
     await loadHousehold(visibleHouseholds[0] ?? null, signedIn.access_token, signedIn.user)
-    if (savedPersonalAddresses.length === 0) setView('address-onboarding')
   }
 
   useEffect(() => {
@@ -822,9 +831,12 @@ function App() {
   }
 
   const sharedCheckout = checkoutCart?.kind === 'household'
+  const needsOwnAddress = household && !addresses.some((address) => address.created_by === session?.user.id)
   function checkoutAddresses(saved, kind) {
     return saved.map((address) => ({
-      ...address, kind, address_id: address.id, pinned: address.latitude != null && address.longitude != null,
+      ...address, kind, address_id: address.id,
+      owner: address.created_by === session.user.id ? 'You' : members.find((member) => member.id === address.created_by)?.display_name,
+      pinned: address.latitude != null && address.longitude != null,
     }))
   }
 
@@ -851,7 +863,7 @@ function App() {
             }}>Resume checkout</button>}
             {!needsAgeSetup && <>
               <button className="secondary" onClick={() => openPage('orders')}>Order history</button>
-              <button className="secondary" onClick={() => openPage('addresses')}>Addresses</button>
+              {household && <button className="secondary" onClick={() => openPage('addresses')}>Addresses</button>}
             </>}
             <button className="secondary" disabled={busy} onClick={() => run(async () => {
               await logoutSession(token)
@@ -900,49 +912,26 @@ function App() {
                 && detail?.cart.id === checkoutCart.cart_id && detail.cart.can_manage_access)}
               contributions={sharedCheckout ? detail?.cart.contributions ?? [] : []}
               members={members} products={products}
-              addresses={[...checkoutAddresses(personalAddresses, 'personal'),
-                ...(sharedCheckout ? checkoutAddresses(addresses, 'household') : [])]}
-              editors={{
-                personal: checkoutAddressBook(account, personalAddresses, setPersonalAddresses),
-                ...(sharedCheckout && api ? { household: checkoutAddressBook(api, addresses, setAddresses) } : {}),
-              }}
+              addresses={sharedCheckout ? checkoutAddresses(addresses, 'household') : []}
+              editors={sharedCheckout && api ? { household: checkoutAddressBook(api, addresses, setAddresses) } : {}}
               onBack={() => { setCheckoutCart(null); setFeedback(null) }} /> :
-          personalAddresses.length === 0 ?
-            <PersonalAddresses addresses={personalAddresses} api={account} displayName={session.user.display_name} busy={busy} required
+          needsOwnAddress || (view === 'addresses' && household) ?
+            <FamilyAddresses key={household.id} required={needsOwnAddress} household={household} userId={session.user.id}
+              members={members} addresses={addresses} api={api} displayName={session.user.display_name} busy={busy}
+              onBack={() => setView('shop')}
+              canEdit={(address) => household.role === 'primary' || address.created_by === session.user.id}
               onSave={(address) => run(async () => {
-                const saved = await account.createAddress(address)
-                setPersonalAddresses((current) => [...current, saved])
-                setView('shop')
-                setFeedback({ text: 'Address saved. You can now start shopping.' })
-                return saved
-              })} /> :
-          view === 'addresses' ?
-            <PersonalAddresses addresses={personalAddresses} api={account} displayName={session.user.display_name} busy={busy}
-              onBack={() => setView('shop')} household={household} sharedAddresses={addresses}
-              onShare={(id) => run(async () => {
-                const shared = await api.shareAddress(id)
-                setAddresses((current) => [...current.filter((other) => other.id !== shared.id), shared])
-                setFeedback({ text: `Shared with ${household.name}.` })
-              })}
-              onStopSharing={(id) => run(async () => {
-                await api.deleteAddress(id)
-                setAddresses((current) => current.filter((other) => other.id !== id))
-                setFeedback({ text: 'No longer shared. The address stays in your own list.' })
-              })}
-              onSave={(address) => run(async () => {
-                const saved = await account.createAddress(address)
-                setPersonalAddresses((current) => [...current, saved])
+                const saved = await api.createAddress(address)
+                setAddresses((current) => [...current.filter((other) => other.id !== saved.id), saved])
                 setFeedback({ text: 'Address added.' })
                 return saved
               })}
-              onUpdatePin={(id, pin) => updatePin(account, setPersonalAddresses, id, pin)}
+              onUpdatePin={(id, pin) => updatePin(api, setAddresses, id, pin)}
               onDelete={(id) => run(async () => {
-                await account.deleteAddress(id)
-                setPersonalAddresses(await account.addresses())
-                // Its shared copy goes with it.
-                setAddresses((current) => current.filter((other) => other.source_address_id !== id))
+                await api.deleteAddress(id)
+                setAddresses(await api.addresses())
               })} /> :
-          detail ? <>
+                    detail ? <>
             <button className="secondary back" onClick={() => setDetail(null)}>← Back to shopping</button>
             <CartDetail key={detail.cart.id} {...detail} user={session.user} busy={busy} products={products} members={members}
               onCheckout={() => startCheckout({ kind: 'household', household_id: householdId, cart_id: cartId })}
@@ -978,16 +967,18 @@ function App() {
               }} />
           :           view === 'household' ?
             <HouseholdDashboard household={household} households={households} session={session} carts={carts} members={members}
-              addresses={addresses} addressApi={api} busy={busy} invitation={invitation} onBack={() => setView('shop')}
-              onCreate={(name) => run(async () => {
-                const created = await account.createHousehold(name, session.user.display_name)
+              addresses={addresses} account={account} busy={busy} invitation={invitation} onBack={() => setView('shop')}
+              onCreate={(name, address) => run(async () => {
+                const created = await account.createHousehold(name, session.user.display_name, address)
                 setHouseholds(await account.households())
                 await loadHousehold(created); setFeedback({ text: 'Household created.' })
+                return created
               })}
-              onJoin={(code) => run(async () => {
-                const joined = await account.acceptInvitation(code, session.user.display_name)
+              onJoin={(code, address) => run(async () => {
+                const joined = await account.acceptInvitation(code, session.user.display_name, address)
                 setHouseholds(await account.households())
                 await loadHousehold(joined); setFeedback({ text: 'You joined the household.' })
+                return joined
               })}
               onSelectHousehold={(id) => run(() => loadHousehold(households.find((item) => item.id === id)))}
               onInvite={() => run(async () => setInvitation(await api.createInvitation()))}
@@ -1005,16 +996,9 @@ function App() {
                 setInvitation(null)
                 setFeedback({ text: 'Household ownership transferred.' })
               })}
-              onAddress={(address) => run(async () => {
-                const saved = await api.createAddress(address)
-                setAddresses((current) => [...current, saved])
-                setFeedback({ text: 'Address shared.' })
-                return saved
-              })}
-              onUpdatePin={(id, pin) => updatePin(api, setAddresses, id, pin)}
-              onDeleteAddress={(id) => run(async () => { await api.deleteAddress(id); setAddresses(await api.addresses()) })}
               onOpenCart={(id) => run(() => openCart(id))}
               onOpenLists={() => openPage('lists')}
+              onOpenAddresses={() => openPage('addresses')}
               onShopCart={(id) => run(() => selectShoppingCart(id))}
               onCreateCart={(name, adultsOnly) => run(async () => {
                 const created = await api.create(name, adultsOnly)

@@ -107,7 +107,7 @@ class SavedAddressTests(unittest.TestCase):
         with TestClient(familycart_app) as cart:
             personal = cart.get(PERSONAL, headers=self.owner).json()[0]
             self.assertEqual((personal["latitude"], personal["longitude"]), (None, None))
-            shared = cart.get(SHARED, headers=self.member).json()[0]
+            shared = cart.get(SHARED, headers=self.owner).json()[0]
             self.assertEqual((shared["latitude"], shared["longitude"]), (None, None))
             missing = cart.post(f"{path}/resolve-store", headers=self.owner)
             self.assertEqual((missing.status_code, missing.json()["detail"]), (409, "ADDRESS_NEEDS_PIN"))
@@ -138,13 +138,15 @@ class SavedAddressTests(unittest.TestCase):
             shared = cart.post(SHARED, headers=self.owner, json=ADDRESS | DUBAI).json()
             shared_path = f"{SHARED}/{shared['id']}"
             self.assertEqual(cart.patch(shared_path, headers=self.member, json=AL_AIN).status_code, 403)
-            self.assertEqual(cart.post(f"{shared_path}/resolve-store", headers=self.member).json()["store_id"], "uae-dubai")
+            # Only its owner and the primary can see a household address.
+            self.assertEqual(cart.post(f"{shared_path}/resolve-store", headers=self.member).status_code, 404)
+            self.assertEqual(cart.post(f"{shared_path}/resolve-store", headers=self.owner).json()["store_id"], "uae-dubai")
             mine = cart.post(SHARED, headers=self.member, json=ADDRESS).json()
             self.assertEqual(cart.patch(f"{SHARED}/{mine['id']}", headers=self.member, json=AL_AIN).status_code, 200)
             self.assertEqual(cart.patch(f"{SHARED}/{mine['id']}", headers=self.owner, json=DUBAI).status_code, 200)
 
             with patch.object(self.upstream, "post", side_effect=httpx.ConnectError("down")):
-                response = cart.post(f"{shared_path}/resolve-store", headers=self.member)
+                response = cart.post(f"{shared_path}/resolve-store", headers=self.owner)
                 self.assertEqual((response.status_code, response.json()["detail"]), (503, "MAPS_UNAVAILABLE"))
             self.assertEqual(cart.delete(f"{HOUSEHOLD}/members/user-adult", headers=self.owner).status_code, 204)
             self.assertEqual(cart.post(f"{shared_path}/resolve-store", headers=self.member).status_code, 404)

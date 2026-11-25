@@ -108,7 +108,7 @@ export function Checkout({
   function option(address) {
     const key = distinctAddress(address)
     return <option value={key} key={key}>
-      {address.label} · {address.city} ({address.kind === 'personal' ? 'personal' : 'household'})
+      {address.label} · {address.city} {address.owner ? `(${address.owner})` : ''}
       {address.pinned ? '' : ' · needs pin'}
     </option>
   }
@@ -136,7 +136,7 @@ export function Checkout({
           <div className="checkout-actions">
             {Object.keys(editors).map((kind) => <button key={kind} className="secondary" disabled={busy}
               onClick={() => { setEditor(editor === kind ? '' : kind); clearReview() }}>
-              {editor === kind ? 'Done' : `Manage ${kind} addresses`}
+              {editor === kind ? 'Done' : 'Manage addresses'}
             </button>)}
           </div>
           {editor ? editors[editor] : <>

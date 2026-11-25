@@ -38,7 +38,7 @@ from .live_sync import (
 )
 from .catalogue import Product, load_catalogue
 from .db import (
-    ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart, increment_personal_revision,
+    ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart, increment_personal_revision,
     initialize_database, load_carts,
     household_member, load_contributions, lock_household, personal_cart, set_contribution, transaction,
 )
@@ -108,10 +108,6 @@ class AgeDecision(BaseModel):
     approved: bool = Field(strict=True)
 
 
-class ShareAddress(BaseModel):
-    address_id: str = Field(min_length=1, max_length=128)
-
-
 class HouseholdCapabilities(BaseModel):
     can_create_adults_only_cart: bool
     is_adult: bool
@@ -120,11 +116,6 @@ class HouseholdCapabilities(BaseModel):
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)]
-
-
-class CreateHousehold(BaseModel):
-    name: Name
-    display_name: Name
 
 
 class HouseholdResponse(BaseModel):
@@ -137,11 +128,6 @@ class HouseholdResponse(BaseModel):
 class CreateInvitationResponse(BaseModel):
     invitation_code: str
     expires_at: str
-
-
-class AcceptInvitation(BaseModel):
-    invitation_code: str = Field(min_length=20, max_length=200)
-    display_name: Name
 
 
 class AddressInput(BaseModel):
@@ -162,11 +148,22 @@ class AddressInput(BaseModel):
         return self
 
 
+class CreateHousehold(BaseModel):
+    name: Name
+    display_name: Name
+    # Everyone in a household, primary or member, gives at least one delivery address.
+    address: AddressInput
+
+
+class AcceptInvitation(BaseModel):
+    invitation_code: str = Field(min_length=20, max_length=200)
+    display_name: Name
+    address: AddressInput
+
+
 class AddressResponse(AddressInput):
     id: str
     created_by: str
-    # Set when this is the shared copy of somebody's personal address.
-    source_address_id: str | None = None
 
 
 class UserAddressResponse(AddressInput):
@@ -524,6 +521,7 @@ def create_household(body: CreateHousehold, request: Request, caller: Caller) ->
                (household_id, user_id, display_name, is_adult) VALUES (?, ?, ?, ?)""",
             (household_id, caller.user_id, body.display_name, int(caller.is_adult)),
         )
+        insert_household_address(db, household_id, body.address, caller.user_id)
         db.execute(
             """INSERT INTO carts (id, household_id, creator_id, name, adults_only)
                VALUES (?, ?, ?, 'Shared shopping cart', 0)""",
@@ -606,6 +604,7 @@ def accept_invitation(
             # Saying "18 or over" is only a claim until this household's primary approves it.
             (household_id, caller.user_id, body.display_name, "PENDING" if caller.is_adult else "NONE"),
         )
+        insert_household_address(db, household_id, body.address, caller.user_id)
         db.execute(
             """INSERT INTO cart_grants (household_id, cart_id, member_id)
                SELECT household_id, id, ? FROM carts
@@ -905,12 +904,6 @@ def pin_user_address(
         ).fetchone()
         if address is None:
             raise HTTPException(status_code=404, detail="Address not found")
-        for shared in db.execute(
-            """UPDATE household_addresses SET latitude = ?, longitude = ?, updated_at = ?
-               WHERE source_address_id = ? AND created_by = ? RETURNING household_id""",
-            (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(), address_id, caller.user_id),
-        ).fetchall():
-            notify_changed(db, shared["household_id"])
         return UserAddressResponse(**dict(address))
 
 
@@ -1076,25 +1069,35 @@ def delete_user_address(address_id: str, request: Request, caller: Caller) -> Re
         ).fetchone()
         if address is None:
             raise HTTPException(status_code=404, detail="Address not found")
-        # Copies shared with a household belong to this address, so they go with it.
-        for shared in db.execute(
-            "DELETE FROM household_addresses WHERE source_address_id = ? AND created_by = ? RETURNING household_id",
-            (address_id, caller.user_id),
-        ).fetchall():
-            notify_changed(db, shared["household_id"])
         db.execute("DELETE FROM user_addresses WHERE id = ?", (address_id,))
     return Response(status_code=204)
+
+
+def insert_household_address(db: DatabaseConnection, household_id: str, body: AddressInput, user_id: str) -> str:
+    address_id = str(uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    db.execute(
+        """INSERT INTO household_addresses
+           (id, household_id, label, recipient_name, address_line1, address_line2,
+            city, postal_code, phone, latitude, longitude, created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            address_id, household_id, body.label, body.recipient_name, body.address_line1, body.address_line2 or None,
+            body.city, body.postal_code or None, body.phone or None, body.latitude, body.longitude, user_id, now, now,
+        ),
+    )
+    return address_id
 
 
 @app.get(f"{HOUSEHOLD}/addresses")
 def list_addresses(
     household_id: str, request: Request, caller: Caller
 ) -> list[AddressResponse]:
-    with household_access(request, household_id, caller) as (db, _):
+    with household_access(request, household_id, caller) as (db, is_primary):
         rows = db.execute(
-            f"""SELECT {ADDRESS_FIELDS}, created_by, source_address_id
-                FROM household_addresses WHERE household_id = ? ORDER BY created_at, id""",
-            (household_id,),
+            f"""SELECT {ADDRESS_FIELDS}, created_by FROM household_addresses
+                WHERE household_id = ? AND (? OR created_by = ?) AND {ACTIVE_ADDRESS} ORDER BY created_at, id""",
+            (household_id, is_primary, caller.user_id),
         )
         return [AddressResponse(**dict(row)) for row in rows]
 
@@ -1103,55 +1106,10 @@ def list_addresses(
 def create_address(
     household_id: str, body: AddressInput, request: Request, caller: Caller
 ) -> AddressResponse:
-    address_id = str(uuid4())
-    now = datetime.now(timezone.utc).isoformat()
     with household_access(request, household_id, caller, write=True) as (db, _):
-        db.execute(
-            """INSERT INTO household_addresses
-               (id, household_id, label, recipient_name, address_line1, address_line2,
-                city, postal_code, phone, latitude, longitude, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                address_id, household_id, body.label, body.recipient_name,
-                body.address_line1, body.address_line2 or None, body.city,
-                body.postal_code or None, body.phone or None, body.latitude, body.longitude,
-                caller.user_id, now, now,
-            ),
-        )
+        address_id = insert_household_address(db, household_id, body, caller.user_id)
         notify_changed(db, household_id)
     return AddressResponse(id=address_id, created_by=caller.user_id, **body.model_dump())
-
-
-@app.post(f"{HOUSEHOLD}/addresses/share", status_code=201)
-def share_address(household_id: str, body: ShareAddress, request: Request, caller: Caller) -> AddressResponse:
-    """Share one of the caller's own addresses. Sharing it twice returns the existing copy."""
-    now = datetime.now(timezone.utc).isoformat()
-    with household_access(request, household_id, caller, write=True) as (db, _):
-        source = db.execute(
-            f"SELECT {ADDRESS_FIELDS} FROM user_addresses WHERE id = ? AND user_id = ?",
-            (body.address_id, caller.user_id),
-        ).fetchone()
-        if source is None:
-            raise HTTPException(status_code=404, detail="Address not found")
-        db.execute(
-            """INSERT INTO household_addresses
-               (id, household_id, label, recipient_name, address_line1, address_line2, city, postal_code, phone,
-                latitude, longitude, source_address_id, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT (household_id, source_address_id) WHERE source_address_id IS NOT NULL DO NOTHING""",
-            (
-                str(uuid4()), household_id, source["label"], source["recipient_name"], source["address_line1"],
-                source["address_line2"], source["city"], source["postal_code"], source["phone"],
-                source["latitude"], source["longitude"], source["id"], caller.user_id, now, now,
-            ),
-        )
-        notify_changed(db, household_id)
-        row = db.execute(
-            f"""SELECT {ADDRESS_FIELDS}, created_by, source_address_id FROM household_addresses
-                WHERE household_id = ? AND source_address_id = ?""",
-            (household_id, source["id"]),
-        ).fetchone()
-        return AddressResponse(**dict(row))
 
 
 @app.patch(HOUSEHOLD_ADDRESS)
@@ -1164,7 +1122,7 @@ def pin_household_address(
         address = db.execute(
             f"""UPDATE household_addresses SET latitude = ?, longitude = ?, updated_at = ?
                 WHERE household_id = ? AND id = ? AND (? OR created_by = ?)
-                RETURNING {ADDRESS_FIELDS}, created_by, source_address_id""",
+                RETURNING {ADDRESS_FIELDS}, created_by""",
             (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(),
              household_id, address_id, is_primary, caller.user_id),
         ).fetchone()
@@ -1184,10 +1142,11 @@ def pin_household_address(
 def resolve_household_address(
     household_id: str, address_id: str, request: Request, caller: Caller,
 ) -> CoverageResult:
-    with household_access(request, household_id, caller, conceal_revoked=True) as (db, _):
+    with household_access(request, household_id, caller, conceal_revoked=True) as (db, is_primary):
         address = db.execute(
-            "SELECT latitude, longitude FROM household_addresses WHERE household_id = ? AND id = ?",
-            (household_id, address_id),
+            f"""SELECT latitude, longitude FROM household_addresses
+                WHERE household_id = ? AND id = ? AND (? OR created_by = ?) AND {ACTIVE_ADDRESS}""",
+            (household_id, address_id, is_primary, caller.user_id),
         ).fetchone()
         if address is None:
             raise HTTPException(status_code=404, detail="Address not found")
@@ -1207,6 +1166,12 @@ def delete_address(
             raise HTTPException(status_code=404, detail="Address not found")
         if not is_primary and address["created_by"] != caller.user_id:
             raise HTTPException(status_code=403, detail="You can only remove an address you added")
+        others = db.execute(
+            "SELECT COUNT(*) AS n FROM household_addresses WHERE household_id = ? AND created_by = ? AND id <> ?",
+            (household_id, address["created_by"], address_id),
+        ).fetchone()["n"]
+        if others == 0 and active_member(db, household_id, address["created_by"]) is not None:
+            raise HTTPException(status_code=409, detail="Every member needs at least one address. Add another one first.")
         db.execute("DELETE FROM household_addresses WHERE id = ?", (address_id,))
         notify_changed(db, household_id)
     return Response(status_code=204)
@@ -1483,7 +1448,11 @@ def view_for(
             ).model_dump()
             for member in members
         ],
-        "addresses": snapshot.get("addresses", []),
+        # Worked out from the current owner, so the view moves with the ownership.
+        "addresses": [
+            address for address in snapshot.get("addresses", [])
+            if is_primary or address["created_by"] == caller.user_id
+        ],
         "is_adult": caller.is_adult,
         "age_status": age_status,
     }

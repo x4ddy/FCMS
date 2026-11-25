@@ -10,6 +10,9 @@ from fastapi.testclient import TestClient
 from backend.services.familycart_service.app import app
 from backend.shared.tokens import Identity, issue_token
 
+HOME = {"label": "Home", "recipient_name": "R", "address_line1": "1 Street", "city": "Dubai",
+        "latitude": 25.2, "longitude": 55.27}
+
 
 class SharedShoppingListTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -26,13 +29,13 @@ class SharedShoppingListTests(unittest.TestCase):
         self.member = self.headers("list-member")
         self.child = self.headers("list-child", adult=False)
         household = self.client.post("/api/v1/households", headers=self.primary, json={
-            "name": "List Family", "display_name": "Pat Primary",
+            "name": "List Family", "display_name": "Pat Primary", "address": HOME,
         }).json()
         self.root = f"/api/v1/households/{household['id']}"
         for headers, name in ((self.member, "Morgan Member"), (self.child, "Casey Child")):
             code = self.client.post(f"{self.root}/invitations", headers=self.primary).json()["invitation_code"]
             joined = self.client.post("/api/v1/household-invitations/accept", headers=headers, json={
-                "invitation_code": code, "display_name": name,
+                "invitation_code": code, "display_name": name, "address": HOME,
             })
             self.assertEqual(joined.status_code, 200)
         [self.shared_cart] = self.client.get(f"{self.root}/carts", headers=self.primary).json()
