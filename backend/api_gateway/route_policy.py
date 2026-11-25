@@ -19,16 +19,16 @@ class Level(Enum):
 S = r"[A-Za-z0-9._~-]+"
 H = rf"households/{S}"
 CART = rf"{H}/carts/{S}"
-LIST = rf"{H}/lists/{S}"
+LIST = rf"(?:{H}/lists|my-lists)/{S}"
 
 _NORMAL = {
     "GET": (
-        "products", rf"products/{S}", "households", "personal-cart", "addresses", "orders", rf"orders/{S}",
+        "my-lists", "products", rf"products/{S}", "households", "personal-cart", "addresses", "orders", rf"orders/{S}",
         "maps/stores", rf"{H}/(?:carts|capabilities|members|addresses|lists)", CART, rf"{CART}/grants", LIST,
     ),
     "POST": (
         "maps/resolve", rf"addresses/{S}/resolve-store", rf"{H}/addresses/{S}/resolve-store",
-        rf"{H}/lists", rf"{LIST}/items", rf"{LIST}/items/(?:bulk|clear-checked)", rf"{LIST}/move-to-cart",
+        "my-lists", rf"{H}/lists", rf"{LIST}/items", rf"{LIST}/items/(?:bulk|clear-checked)", rf"{LIST}/move-to-cart",
     ),
     "PUT": (rf"{CART}/items/{S}/contributions/me",),
     "PATCH": (
@@ -39,7 +39,7 @@ _NORMAL = {
 }
 _CRITICAL = {
     "POST": ("checkout/orders", "auth/age"),
-    "PUT": (rf"{H}/members/{S}/primary",),
+    "PUT": (rf"{H}/members/{S}/primary", rf"{H}/members/{S}/age"),
     "DELETE": (rf"{H}/members/{S}",),
 }
 

@@ -27,8 +27,8 @@ from backend.shared.database import DatabaseConnection
 from backend.shared.tokens import Identity, verify_token
 
 from .app import (
-    MAX_QUANTITY, Caller, household_access, record_cart_change, require_product_for_cart,
-    require_visible_cart, visible_product,
+    MAX_QUANTITY, Caller, CartResponse, household_access, record_cart_change, require_product_for_cart,
+    require_visible_cart, viewer_age, visible_product,
 )
 from .db import ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, contribution_quantity, set_contribution
 from .live_sync import AccessEnded, notify_changed, viewer_role
@@ -444,53 +444,67 @@ def add_to_personal_cart(db: DatabaseConnection, user_id: str, sku: str, quantit
     db.execute("UPDATE personal_carts SET updated_at = ? WHERE id = ?", (now, cart_id))
 
 
+def add_rows_to_cart(
+    db: DatabaseConnection, request: Request, household_id: str, cart: CartResponse | None, caller: Identity,
+    item_ids: list[str], now: str, *, find: str, list_id: str,
+) -> MoveResult:
+    """Put the chosen list items in a cart. ``cart`` is None for the caller's personal cart.
+
+    Items that are not allowed are skipped with a reason instead of failing the rest.
+    """
+    moved: list[str] = []
+    skipped: list[SkippedItem] = []
+    for item_id in dict.fromkeys(item_ids):
+        row = db.execute(find, (list_id, item_id)).fetchone()
+        if row is None or not item_visible(request, caller, row["sku"]):
+            skipped.append(SkippedItem(id=item_id, reason="Item not found"))
+            continue
+        if row["sku"] is None:
+            skipped.append(SkippedItem(id=item_id, reason="Not a catalogue product"))
+            continue
+        try:
+            if cart is None:
+                visible_product(request, row["sku"], caller)
+                add_to_personal_cart(db, caller.user_id, row["sku"], row["quantity"], now)
+            else:
+                require_product_for_cart(request, row["sku"], caller, cart)
+                current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
+                set_contribution(
+                    db, household_id, cart.id, row["sku"], caller.user_id,
+                    min(MAX_QUANTITY, current + row["quantity"]),
+                )
+        except HTTPException as error:
+            skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
+            continue
+        moved.append(item_id)
+    if moved and cart is not None:
+        record_cart_change(db, household_id, cart.id, caller.user_id)
+    return MoveResult(moved=moved, skipped=skipped)
+
+
 @router.post(f"{LIST}/move-to-cart")
 def move_to_cart(
     household_id: str, list_id: str, body: MoveToCart, request: Request, caller: Caller
 ) -> MoveResult:
     now = now_iso()
-    moved: list[str] = []
-    skipped: list[SkippedItem] = []
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_list(db, household_id, list_id)
-        personal = body.target == "personal"
-        cart = None if personal else require_visible_cart(db, household_id, body.target, caller, is_primary)
-        for item_id in dict.fromkeys(body.item_ids):
-            row = db.execute(
-                "SELECT id, sku, quantity FROM shopping_list_items WHERE list_id = ? AND id = ?",
-                (list_id, item_id),
-            ).fetchone()
-            if row is None or not item_visible(request, caller, row["sku"]):
-                skipped.append(SkippedItem(id=item_id, reason="Item not found"))
-                continue
-            if row["sku"] is None:
-                skipped.append(SkippedItem(id=item_id, reason="Not a catalogue product"))
-                continue
-            try:
-                if personal:
-                    visible_product(request, row["sku"], caller)
-                    add_to_personal_cart(db, caller.user_id, row["sku"], row["quantity"], now)
-                else:
-                    require_product_for_cart(request, row["sku"], caller, cart)
-                    current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
-                    set_contribution(
-                        db, household_id, cart.id, row["sku"], caller.user_id,
-                        min(MAX_QUANTITY, current + row["quantity"]),
-                    )
-            except HTTPException as error:
-                skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
-                continue
+        cart = None if body.target == "personal" else require_visible_cart(
+            db, household_id, body.target, caller, is_primary,
+        )
+        result = add_rows_to_cart(
+            db, request, household_id, cart, caller, body.item_ids, now,
+            find="SELECT id, sku, quantity FROM shopping_list_items WHERE list_id = ? AND id = ?", list_id=list_id,
+        )
+        for item_id in result.moved:
             db.execute(
                 """UPDATE shopping_list_items SET checked = 1, checked_by = ?, checked_at = ?, updated_at = ?
                    WHERE id = ?""",
                 (caller.user_id, now, now, item_id),
             )
-            moved.append(item_id)
-        if moved:
+        if result.moved:
             touch(db, household_id, list_id, now)
-            if cart is not None:
-                record_cart_change(db, household_id, cart.id, caller.user_id)
-    return MoveResult(moved=moved, skipped=skipped)
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +513,7 @@ def move_to_cart(
 # ---------------------------------------------------------------------------
 def lists_view(connection, snapshot: dict, caller: Identity) -> dict:
     is_primary = viewer_role(snapshot, caller.user_id)
+    caller, _ = viewer_age(snapshot, caller)
     changed = []
     for entry in snapshot["lists"]:
         if entry["archived"]:

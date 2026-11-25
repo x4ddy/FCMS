@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS household_member_profiles (
     user_id TEXT NOT NULL,
     display_name TEXT NOT NULL,
     is_adult INTEGER NOT NULL CHECK (is_adult IN (0, 1)),
+    -- NONE: said under 18. Others: said 18 or over; the primary decides. is_adult is 1 only once approved.
+    age_status TEXT NOT NULL DEFAULT 'APPROVED' CHECK (age_status IN ('NONE', 'PENDING', 'APPROVED', 'REJECTED')),
     PRIMARY KEY (household_id, user_id),
     FOREIGN KEY (household_id, user_id)
         REFERENCES household_members (household_id, user_id)
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS household_addresses (
     phone TEXT,
     latitude REAL,
     longitude REAL,
+    source_address_id TEXT,
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -189,3 +192,29 @@ CREATE INDEX IF NOT EXISTS shopping_list_items_list_idx
 -- Live-update worker: "which lists changed?" and per-household event lookups.
 CREATE INDEX IF NOT EXISTS shopping_lists_updated_idx ON shopping_lists (updated_at);
 CREATE INDEX IF NOT EXISTS cart_sync_events_household_idx ON cart_sync_events (household_id, id);
+
+-- Private lists that belong to one account, separate from household lists.
+CREATE TABLE IF NOT EXISTS personal_lists (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS personal_lists_user_idx ON personal_lists (user_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS personal_list_items (
+    id TEXT PRIMARY KEY,
+    list_id TEXT NOT NULL REFERENCES personal_lists(id) ON DELETE CASCADE,
+    sku TEXT,
+    custom_name TEXT,
+    quantity INTEGER NOT NULL CHECK (quantity BETWEEN 1 AND 999),
+    note TEXT,
+    checked INTEGER NOT NULL DEFAULT 0 CHECK (checked IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (sku IS NOT NULL OR custom_name IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS personal_list_items_list_idx ON personal_list_items (list_id, created_at);

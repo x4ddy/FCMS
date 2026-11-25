@@ -5,7 +5,8 @@ import os
 import secrets
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 from uuid import uuid4
 
@@ -21,7 +22,7 @@ from starlette.requests import HTTPConnection
 
 from backend.shared.api import API_PREFIX
 from backend.shared.cache import cache_redis_url, live_redis_url
-from backend.shared.database import DatabaseConnection
+from backend.shared.database import DatabaseConnection, database_error_types
 from backend.shared.demo_members import MEMBERS_BY_ID
 from backend.shared.maps import (
     Coordinates, CoverageResult, Latitude, Longitude, MAPS_UNAVAILABLE, address_validation_error,
@@ -29,7 +30,7 @@ from backend.shared.maps import (
 )
 from backend.shared.tokens import Identity, load_jwt_secret, verify_token
 from backend.services.refresh_service.service import session_profile
-from backend.services.user_service.db import database_path as user_database_path
+from backend.services.user_service.db import birth_dates, database_path as user_database_path
 
 from . import checkout
 from .live_sync import (
@@ -98,10 +99,23 @@ class MemberResponse(BaseModel):
     display_name: str
     role: str | None = None
     is_adult: bool | None = None
+    # Only sent to the primary, who decides.
+    age_status: str | None = None
+    claimed_age: int | None = None
+
+
+class AgeDecision(BaseModel):
+    approved: bool = Field(strict=True)
+
+
+class ShareAddress(BaseModel):
+    address_id: str = Field(min_length=1, max_length=128)
 
 
 class HouseholdCapabilities(BaseModel):
     can_create_adults_only_cart: bool
+    is_adult: bool
+    age_status: str
 
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
@@ -151,6 +165,8 @@ class AddressInput(BaseModel):
 class AddressResponse(AddressInput):
     id: str
     created_by: str
+    # Set when this is the shared copy of somebody's personal address.
+    source_address_id: str | None = None
 
 
 class UserAddressResponse(AddressInput):
@@ -202,13 +218,46 @@ async def invalid_request(request: Request, error: RequestValidationError) -> Re
     return await request_validation_exception_handler(request, error)
 
 
+@dataclass
+class RequestIdentity:
+    """The caller of one request.
+
+    ``is_adult`` starts as what the account says. household_access() lowers it when
+    that household's primary has not approved it, so every later rule sees the result.
+    """
+
+    user_id: str
+    is_adult: bool
+    session_id: str | None = None
+
+
+def age_allowed(age_status: str | None) -> bool:
+    return age_status in (None, "APPROVED")
+
+
+def apply_account_age(db: DatabaseConnection, caller) -> None:
+    """Outside any one household: a member still waiting everywhere does not count as an adult."""
+    if not caller.is_adult:
+        return
+    statuses = [row["age_status"] for row in db.execute(
+        """SELECT person.age_status FROM household_members AS members
+           JOIN household_member_profiles AS person
+             ON person.household_id = members.household_id AND person.user_id = members.user_id
+           WHERE members.user_id = ? AND members.active = 1""",
+        (caller.user_id,),
+    ).fetchall()]
+    if statuses and not any(age_allowed(status) for status in statuses):
+        caller.is_adult = False
+
+
 def require_identity(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-) -> Identity:
+) -> RequestIdentity:
     if credentials is not None:
         try:
-            return verify_token(credentials.credentials, request.app.state.jwt_secret)
+            identity = verify_token(credentials.credentials, request.app.state.jwt_secret)
+            return RequestIdentity(identity.user_id, identity.is_adult, identity.session_id)
         except InvalidTokenError:
             pass
 
@@ -219,7 +268,7 @@ def require_identity(
     )
 
 
-Caller = Annotated[Identity, Depends(require_identity)]
+Caller = Annotated[RequestIdentity, Depends(require_identity)]
 
 
 @contextmanager
@@ -240,6 +289,8 @@ def household_access(
                     detail=f"Your household access was revoked. Contact {primary_name}, the primary account holder.",
                 )
             raise HTTPException(status_code=404, detail="Household not found")
+        if isinstance(caller, RequestIdentity) and not age_allowed(member["age_status"]):
+            caller.is_adult = False
         # The household profile identifies the current primary, including after a transfer.
         yield db, member["owner_id"] == caller.user_id
 
@@ -337,7 +388,7 @@ def household_members(db: DatabaseConnection, household_id: str, *, include_role
     rows = db.execute(
         """
         SELECT members.user_id, household.created_by AS owner_id,
-               profiles.display_name, profiles.is_adult
+               profiles.display_name, profiles.is_adult, profiles.age_status
         FROM household_members AS members
         JOIN household_profiles AS household ON household.household_id = members.household_id
         LEFT JOIN household_member_profiles AS profiles
@@ -361,6 +412,7 @@ def household_members(db: DatabaseConnection, household_id: str, *, include_role
                 if include_roles and row["is_adult"] is not None
                 else bool(fixture and fixture.identity.is_adult) if include_roles else None
             ),
+            age_status=(row["age_status"] or "APPROVED") if include_roles else None,
         ))
     return members
 
@@ -397,6 +449,8 @@ def adjust_personal_cart_item(
 ) -> PersonalCartItem:
     if body.delta == 0:
         raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
+    with transaction(request.app.state.db_path) as db:
+        apply_account_age(db, caller)
     visible_product(request, sku, caller)
     with transaction(request.app.state.db_path, write=True) as db:
         cart = personal_cart(db, caller.user_id, lock=True)
@@ -529,6 +583,8 @@ def accept_invitation(
             raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
         household_id = invitation["household_id"]
         lock_household(db, household_id)
+        if active_member(db, household_id, caller.user_id) is not None:
+            raise HTTPException(status_code=409, detail="You are already a member of this household")
         claimed = db.execute(
             """UPDATE household_invitations SET accepted_by = ?, accepted_at = ?
                WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?""",
@@ -544,10 +600,11 @@ def accept_invitation(
         )
         db.execute(
             """INSERT INTO household_member_profiles
-               (household_id, user_id, display_name, is_adult) VALUES (?, ?, ?, ?)
+               (household_id, user_id, display_name, is_adult, age_status) VALUES (?, ?, ?, 0, ?)
                ON CONFLICT (household_id, user_id) DO UPDATE SET
-                 display_name = excluded.display_name, is_adult = excluded.is_adult""",
-            (household_id, caller.user_id, body.display_name, int(caller.is_adult)),
+                 display_name = excluded.display_name, is_adult = 0, age_status = excluded.age_status""",
+            # Saying "18 or over" is only a claim until this household's primary approves it.
+            (household_id, caller.user_id, body.display_name, "PENDING" if caller.is_adult else "NONE"),
         )
         db.execute(
             """INSERT INTO cart_grants (household_id, cart_id, member_id)
@@ -577,7 +634,13 @@ def visible_carts(
 
 
 @app.get(f"{API_PREFIX}/products")
-def list_products(request: Request, caller: Caller, q: str = "") -> list[Product]:
+def list_products(request: Request, caller: Caller, q: str = "", household_id: str | None = None) -> list[Product]:
+    if household_id is not None:
+        with household_access(request, household_id, caller):
+            pass
+    elif caller.is_adult:
+        with transaction(request.app.state.db_path) as db:
+            apply_account_age(db, caller)
     query = q.strip().casefold()
     return [
         product for product in request.app.state.products.values()
@@ -603,6 +666,8 @@ def visible_contributions(connection: HTTPConnection, caller: Identity, rows: li
 
 @app.get(f"{API_PREFIX}/products/{{sku}}")
 def get_product(request: Request, sku: SKU, caller: Caller) -> Product:
+    with transaction(request.app.state.db_path) as db:
+        apply_account_age(db, caller)
     return visible_product(request, sku, caller)
 
 
@@ -616,8 +681,11 @@ def list_carts(
 
 @app.get(f"{HOUSEHOLD}/capabilities")
 def household_capabilities(household_id: str, request: Request, caller: Caller) -> HouseholdCapabilities:
-    with household_access(request, household_id, caller) as (_, is_primary):
-        return HouseholdCapabilities(can_create_adults_only_cart=can_create_adults_only_cart(caller, is_primary))
+    with household_access(request, household_id, caller) as (db, is_primary):
+        return HouseholdCapabilities(
+            can_create_adults_only_cart=can_create_adults_only_cart(caller, is_primary), is_adult=caller.is_adult,
+            age_status=active_member(db, household_id, caller.user_id)["age_status"] or "APPROVED",
+        )
 
 
 @app.post(f"{HOUSEHOLD}/carts", status_code=201)
@@ -674,7 +742,51 @@ def remove_cart(household_id: str, cart_id: str, request: Request, caller: Calle
 def list_members(household_id: str, request: Request, caller: Caller, include_roles: bool = False) -> list[MemberResponse]:
     with household_access(request, household_id, caller) as (db, is_primary):
         require_primary(is_primary)
-        return household_members(db, household_id, include_roles=include_roles)
+        members = household_members(db, household_id, include_roles=include_roles)
+    claims = [member for member in members if member.age_status in ("PENDING", "REJECTED")]
+    if claims:
+        today = datetime.now(timezone.utc).date()
+        try:
+            births = birth_dates(request.app.state.user_db_path, [member.id for member in claims])
+        except database_error_types():
+            births = {}  # the list still works without the claimed ages
+        for member in claims:
+            if member.id in births:
+                born = date.fromisoformat(births[member.id])
+                member.claimed_age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    return members
+
+
+@app.put(f"{HOUSEHOLD}/members/{{member_id}}/age", status_code=204)
+def decide_member_age(
+    household_id: str, member_id: str, body: AgeDecision, request: Request, caller: Caller
+) -> Response:
+    """The primary confirms or refuses a member's claim to be 18 or over, for this household only."""
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        require_primary(is_primary)
+        if not caller.is_adult:
+            raise HTTPException(status_code=403, detail="Only a primary aged 18 or over can approve ages")
+        if member_id == caller.user_id:
+            raise HTTPException(status_code=409, detail="You cannot approve your own age")
+        member = active_member(db, household_id, member_id)
+        if member is None:
+            raise HTTPException(status_code=404, detail="Member not found")
+        if member["age_status"] == "NONE":
+            raise HTTPException(status_code=409, detail="This member said they are under 18")
+        db.execute(
+            """UPDATE household_member_profiles SET is_adult = ?, age_status = ?
+               WHERE household_id = ? AND user_id = ?""",
+            (int(body.approved), "APPROVED" if body.approved else "REJECTED", household_id, member_id),
+        )
+        if not body.approved:
+            db.execute(
+                """DELETE FROM cart_grants WHERE household_id = ? AND member_id = ?
+                   AND cart_id IN (SELECT id FROM carts WHERE household_id = ? AND adults_only = 1)""",
+                (household_id, member_id, household_id),
+            )
+        for cart in db.execute("SELECT id FROM carts WHERE household_id = ?", (household_id,)).fetchall():
+            record_cart_change(db, household_id, cart["id"], caller.user_id)
+    return Response(status_code=204)
 
 
 @app.put(f"{HOUSEHOLD}/members/{{member_id}}/primary")
@@ -685,8 +797,12 @@ def promote_member(
         require_primary(is_primary)
         if member_id == caller.user_id:
             raise HTTPException(status_code=409, detail="This member already owns the household")
-        if active_member(db, household_id, member_id) is None:
+        target = active_member(db, household_id, member_id)
+        if target is None:
             raise HTTPException(status_code=404, detail="Member not found")
+        if target["age_status"] == "PENDING":
+            # Nobody could approve them once they are the primary.
+            raise HTTPException(status_code=409, detail="Approve or reject this member's age first")
 
         db.execute(
             "UPDATE household_members SET role = 'member' WHERE household_id = ? AND user_id = ?",
@@ -789,6 +905,12 @@ def pin_user_address(
         ).fetchone()
         if address is None:
             raise HTTPException(status_code=404, detail="Address not found")
+        for shared in db.execute(
+            """UPDATE household_addresses SET latitude = ?, longitude = ?, updated_at = ?
+               WHERE source_address_id = ? AND created_by = ? RETURNING household_id""",
+            (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(), address_id, caller.user_id),
+        ).fetchall():
+            notify_changed(db, shared["household_id"])
         return UserAddressResponse(**dict(address))
 
 
@@ -813,15 +935,22 @@ def checkout_profile(request: Request, caller: Identity):
     return profile
 
 
-def require_checkout_adult(request: Request, caller: Identity) -> None:
+def require_checkout_adult(request: Request, caller: Identity, reference) -> None:
     profile = checkout_profile(request, caller)
+    with transaction(request.app.state.db_path) as db:
+        if reference.kind == "household":
+            member = active_member(db, reference.household_id, caller.user_id)
+            if member is not None and not age_allowed(member["age_status"]):
+                caller.is_adult = False
+        else:
+            apply_account_age(db, caller)
     if not caller.is_adult or not profile["is_adult"]:
         raise checkout.error(403, "AGE_ELIGIBILITY_REQUIRED", "Checkout requires an adult account.")
 
 
 @app.post(f"{API_PREFIX}/checkout/quotes", status_code=201)
 def review_checkout(body: checkout.QuoteInput, request: Request, response: Response, caller: Caller) -> dict:
-    require_checkout_adult(request, caller)
+    require_checkout_adult(request, caller, body.cart)
     path = request.app.state.db_path
     products = request.app.state.products
     with transaction(path, write=True) as db:
@@ -856,11 +985,13 @@ def place_order(
             existing = replay(db)
             if existing:
                 return existing
-            require_checkout_adult(request, caller)
+            if not caller.is_adult or not checkout_profile(request, caller)["is_adult"]:
+                raise checkout.error(403, "AGE_ELIGIBILITY_REQUIRED", "Checkout requires an adult account.")
             if "mock_outcome" in body.model_fields_set and not request.app.state.demo_checkout:
                 raise checkout.error(422, "MOCK_OUTCOME_DISABLED", "Mock payment overrides are disabled.")
             reviewed, expires_at = checkout.load_quote(db, body.quote_id, caller.user_id)
             selection = checkout.QuoteInput.model_validate(reviewed["state"]["selection"])
+            require_checkout_adult(request, caller, selection.cart)
             state = checkout.revalidate(db, reviewed["state"], selection, caller, products, lock=False)
         groups = checkout.resolve_groups(state["groups"], lambda lat, lon: resolve_address_pin(request, lat, lon))
         if groups != reviewed["groups"]:
@@ -881,7 +1012,7 @@ def place_order(
             return existing
         checkout.load_quote(db, body.quote_id, caller.user_id)
         checkout.revalidate(db, reviewed["state"], selection, caller, products, lock=True)
-        require_checkout_adult(request, caller)
+        require_checkout_adult(request, caller, selection.cart)
         order_id = checkout.claim_order(db, caller.user_id, key, attempt, body, selection, groups)
         if order_id is None:
             existing = replay(db)
@@ -945,6 +1076,12 @@ def delete_user_address(address_id: str, request: Request, caller: Caller) -> Re
         ).fetchone()
         if address is None:
             raise HTTPException(status_code=404, detail="Address not found")
+        # Copies shared with a household belong to this address, so they go with it.
+        for shared in db.execute(
+            "DELETE FROM household_addresses WHERE source_address_id = ? AND created_by = ? RETURNING household_id",
+            (address_id, caller.user_id),
+        ).fetchall():
+            notify_changed(db, shared["household_id"])
         db.execute("DELETE FROM user_addresses WHERE id = ?", (address_id,))
     return Response(status_code=204)
 
@@ -955,7 +1092,7 @@ def list_addresses(
 ) -> list[AddressResponse]:
     with household_access(request, household_id, caller) as (db, _):
         rows = db.execute(
-            f"""SELECT {ADDRESS_FIELDS}, created_by
+            f"""SELECT {ADDRESS_FIELDS}, created_by, source_address_id
                 FROM household_addresses WHERE household_id = ? ORDER BY created_at, id""",
             (household_id,),
         )
@@ -981,7 +1118,40 @@ def create_address(
                 caller.user_id, now, now,
             ),
         )
+        notify_changed(db, household_id)
     return AddressResponse(id=address_id, created_by=caller.user_id, **body.model_dump())
+
+
+@app.post(f"{HOUSEHOLD}/addresses/share", status_code=201)
+def share_address(household_id: str, body: ShareAddress, request: Request, caller: Caller) -> AddressResponse:
+    """Share one of the caller's own addresses. Sharing it twice returns the existing copy."""
+    now = datetime.now(timezone.utc).isoformat()
+    with household_access(request, household_id, caller, write=True) as (db, _):
+        source = db.execute(
+            f"SELECT {ADDRESS_FIELDS} FROM user_addresses WHERE id = ? AND user_id = ?",
+            (body.address_id, caller.user_id),
+        ).fetchone()
+        if source is None:
+            raise HTTPException(status_code=404, detail="Address not found")
+        db.execute(
+            """INSERT INTO household_addresses
+               (id, household_id, label, recipient_name, address_line1, address_line2, city, postal_code, phone,
+                latitude, longitude, source_address_id, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (household_id, source_address_id) WHERE source_address_id IS NOT NULL DO NOTHING""",
+            (
+                str(uuid4()), household_id, source["label"], source["recipient_name"], source["address_line1"],
+                source["address_line2"], source["city"], source["postal_code"], source["phone"],
+                source["latitude"], source["longitude"], source["id"], caller.user_id, now, now,
+            ),
+        )
+        notify_changed(db, household_id)
+        row = db.execute(
+            f"""SELECT {ADDRESS_FIELDS}, created_by, source_address_id FROM household_addresses
+                WHERE household_id = ? AND source_address_id = ?""",
+            (household_id, source["id"]),
+        ).fetchone()
+        return AddressResponse(**dict(row))
 
 
 @app.patch(HOUSEHOLD_ADDRESS)
@@ -994,7 +1164,7 @@ def pin_household_address(
         address = db.execute(
             f"""UPDATE household_addresses SET latitude = ?, longitude = ?, updated_at = ?
                 WHERE household_id = ? AND id = ? AND (? OR created_by = ?)
-                RETURNING {ADDRESS_FIELDS}, created_by""",
+                RETURNING {ADDRESS_FIELDS}, created_by, source_address_id""",
             (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(),
              household_id, address_id, is_primary, caller.user_id),
         ).fetchone()
@@ -1006,6 +1176,7 @@ def pin_household_address(
             if exists is None:
                 raise HTTPException(status_code=404, detail="Address not found")
             raise HTTPException(status_code=403, detail="You can only move the pin for an address you added")
+        notify_changed(db, household_id)
         return AddressResponse(**dict(address))
 
 
@@ -1037,6 +1208,7 @@ def delete_address(
         if not is_primary and address["created_by"] != caller.user_id:
             raise HTTPException(status_code=403, detail="You can only remove an address you added")
         db.execute("DELETE FROM household_addresses WHERE id = ?", (address_id,))
+        notify_changed(db, household_id)
     return Response(status_code=204)
 
 
@@ -1268,6 +1440,15 @@ def remove_contribution(
         return save_quantity(db, household_id, cart_id, sku, contributor_id, 0, caller.user_id)
 
 
+def viewer_age(snapshot: dict, caller: Identity) -> tuple[Identity, str]:
+    """The viewer as this household sees them: an adult only once their age is approved here."""
+    member = next(member for member in snapshot["members"] if member["id"] == caller.user_id)
+    status = member.get("age_status") or "APPROVED"
+    if caller.is_adult and not age_allowed(status):
+        caller = replace(caller, is_adult=False)
+    return caller, status
+
+
 def view_for(
     connection: HTTPConnection, snapshot: dict, caller: Identity, cart_id: str | None, *, batch: bool
 ) -> dict:
@@ -1277,6 +1458,7 @@ def view_for(
     roles and age flags from non-primaries, and only the primary sees cart grants.
     """
     is_primary = viewer_role(snapshot, caller.user_id)
+    caller, age_status = viewer_age(snapshot, caller)
     members = sorted((member for member in snapshot["members"] if member["active"]), key=lambda member: member["id"])
     carts = []
     for cart in snapshot["carts"]:
@@ -1297,9 +1479,13 @@ def view_for(
                 id=member["id"], display_name=member["display_name"],
                 role=("primary" if member["id"] == snapshot["owner_id"] else "member") if is_primary else None,
                 is_adult=member["is_adult"] if is_primary else None,
+                age_status=member.get("age_status") if is_primary else None,
             ).model_dump()
             for member in members
         ],
+        "addresses": snapshot.get("addresses", []),
+        "is_adult": caller.is_adult,
+        "age_status": age_status,
     }
     if cart_id is None:
         return view
@@ -1408,9 +1594,9 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
                         continue
                     batch = json.loads(message["data"])
                     if batch["revision"] is None or batch["revision"] <= revision:
-                        # Nothing new for carts (e.g. a lists-only batch), but still
-                        # notice if this viewer was removed from the household.
-                        live_view(socket, household_id, caller, None, batch)
+                        # No cart contents changed, but members, ages or shared addresses
+                        # may have. This also notices a viewer who was removed.
+                        await socket.send_json(live_view(socket, household_id, caller, None, batch))
                         continue
                     # Built in memory from the shared snapshot: no database query per viewer.
                     view = live_view(socket, household_id, caller, cart_id, batch)
@@ -1432,6 +1618,7 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
 
 # Shopping-list routes reuse the access helpers above, so they are registered
 # after everything they import has been defined.
-from . import lists  # noqa: E402
+from . import lists, my_lists  # noqa: E402
 
 app.include_router(lists.router)
+app.include_router(my_lists.router)

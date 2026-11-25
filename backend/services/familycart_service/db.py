@@ -9,6 +9,10 @@ SQL_DIR = Path(__file__).parent
 ADDRESS_TABLES = ("user_addresses", "household_addresses")
 ADDRESS_FIELDS = "id, label, recipient_name, address_line1, address_line2, city, postal_code, phone, latitude, longitude"
 
+# One shared copy of a personal address per household. Created after the column migration.
+SHARED_ADDRESS_INDEX = """CREATE UNIQUE INDEX IF NOT EXISTS household_addresses_source_idx
+    ON household_addresses (household_id, source_address_id) WHERE source_address_id IS NOT NULL"""
+
 
 def database_target() -> DatabaseTarget:
     return os.environ.get("FAMILYCART_DATABASE_URL") or Path(
@@ -28,6 +32,10 @@ def initialize_database(path: DatabaseTarget) -> None:
                 add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT"})
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
+                add_sqlite_columns(db, "household_addresses", {"source_address_id": "TEXT"})
+                # People who were members before age approval existed keep the access they had.
+                add_sqlite_columns(db, "household_member_profiles", {"age_status": "TEXT NOT NULL DEFAULT 'APPROVED'"})
+                db.execute(SHARED_ADDRESS_INDEX)
         else:
             db.execute("BEGIN")
             try:
@@ -37,6 +45,10 @@ def initialize_database(path: DatabaseTarget) -> None:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
                         ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION""")
+                db.execute("ALTER TABLE household_addresses ADD COLUMN IF NOT EXISTS source_address_id TEXT")
+                db.execute("""ALTER TABLE household_member_profiles
+                    ADD COLUMN IF NOT EXISTS age_status TEXT NOT NULL DEFAULT 'APPROVED'""")
+                db.execute(SHARED_ADDRESS_INDEX)
                 db.execute_script(seed)
                 db.execute_script(checkout_schema)
             except Exception:
@@ -76,9 +88,11 @@ def active_member(
     row_lock = "FOR SHARE OF members, profiles" if lock and db.dialect == "postgresql" else ""
     return db.execute(
         f"""
-        SELECT members.role, profiles.created_by AS owner_id
+        SELECT members.role, profiles.created_by AS owner_id, person.age_status
         FROM household_members AS members
         JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
+        LEFT JOIN household_member_profiles AS person
+          ON person.household_id = members.household_id AND person.user_id = members.user_id
         WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
         {row_lock}
         """,

@@ -178,6 +178,9 @@ class HouseholdAccountTests(unittest.TestCase):
         item_path = f"{cart_path}/items/milk"
         self.assertEqual(self.client.patch(item_path, headers=successor, json={"delta": 1}).status_code, 200)
 
+        self.assertEqual(self.client.put(
+            f"{root}/members/transfer-successor/age", headers=primary, json={"approved": True},
+        ).status_code, 204)
         transferred_household = self.client.put(
             f"{root}/members/transfer-successor/primary", headers=primary,
         )

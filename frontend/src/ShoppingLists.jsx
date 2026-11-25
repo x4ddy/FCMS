@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
 import {
-  avatarHue, cartReadyItems, groupListItems, initials, itemLabel, mergeListUpdate, parsePastedList, parseQuickAdd,
+  avatarHue, cartReadyItems, chosenForCart, groupListItems, initials, itemLabel, mergeListUpdate, parsePastedList, parseQuickAdd,
   productSuggestions, timeAgo, upsertListSummary,
 } from './listState.js'
 
@@ -25,7 +25,7 @@ function ProgressBar({ done, total }) {
 /* Overview                                                                 */
 /* ------------------------------------------------------------------------ */
 
-function ListsOverview({ lists, loading, busy, onCreate, onOpen }) {
+function ListsOverview({ mine, lists, loading, busy, onCreate, onOpen }) {
   const [name, setName] = useState('')
   const create = (value) => {
     const trimmed = value.trim()
@@ -52,8 +52,10 @@ function ListsOverview({ lists, loading, busy, onCreate, onOpen }) {
         <div className="list-empty">
           <span aria-hidden="true">📝</span>
           <h2>No lists yet</h2>
-          <p>Lists are shared with everyone in your household. Jot things down as you think of them,
-            tick them off together, then send them to a cart in one tap.</p>
+          <p>{mine
+            ? 'These lists are private to you. Nobody in your household can see them.'
+            : 'Household lists are shared with everyone in your household.'} Jot things down as you think of them,
+            tick them off, then send the items you choose to a household cart.</p>
         </div>
       ) : (
         <ul className="list-grid">
@@ -198,7 +200,7 @@ function QuickAdd({ products, busy, onAddProduct, onAddCustom, onAddMany }) {
 /* One list item                                                            */
 /* ------------------------------------------------------------------------ */
 
-function ListItemRow({ item, product, onToggle, onQuantity, onNote, onDelete }) {
+function ListItemRow({ item, product, chosen, onChoose, onToggle, onQuantity, onNote, onDelete }) {
   const [editingNote, setEditingNote] = useState(false)
   const [note, setNote] = useState(item.note ?? '')
   useEffect(() => { if (!editingNote) setNote(item.note ?? '') }, [item.note, editingNote])
@@ -208,7 +210,7 @@ function ListItemRow({ item, product, onToggle, onQuantity, onNote, onDelete }) 
     if ((note.trim() || null) !== (item.note ?? null)) onNote(note.trim())
   }
   return (
-    <li className={`list-item ${item.checked ? 'checked' : ''} ${item.pending ? 'pending' : ''}`}>
+    <li className={`list-item ${item.checked ? 'checked' : ''} ${item.pending ? 'pending' : ''} ${chosen ? 'chosen' : ''}`}>
       <label className="list-check">
         <input type="checkbox" checked={item.checked} onChange={() => onToggle(!item.checked)}
           aria-label={`${item.checked ? 'Untick' : 'Tick off'} ${label}`} />
@@ -237,6 +239,10 @@ function ListItemRow({ item, product, onToggle, onQuantity, onNote, onDelete }) 
         </small>
       </div>
       <div className="list-item-actions">
+        {onChoose && <button className="secondary choose-button" aria-pressed={chosen} disabled={item.pending}
+          aria-label={`${chosen ? 'Do not send' : 'Choose'} ${label} for the cart`} onClick={onChoose}>
+          {chosen ? '✓ Chosen' : 'Choose'}
+        </button>}
         {!item.checked && <div className="mini-stepper" aria-label={`Quantity for ${label}`}>
           <button className="secondary" disabled={item.quantity <= 1} aria-label={`One less ${label}`}
             onClick={() => onQuantity(item.quantity - 1)}>−</button>
@@ -257,7 +263,7 @@ function ListItemRow({ item, product, onToggle, onQuantity, onNote, onDelete }) 
 /* ------------------------------------------------------------------------ */
 
 function ListDetail({
-  list, products, productsBySku, categoryOrder, carts, defaultCartId, busy,
+  mine, list, products, productsBySku, categoryOrder, carts, defaultCartId, busy,
   onBack, onRename, onDelete, onAddProduct, onAddCustom, onAddMany, onUpdateItem, onDeleteItem, onClearDone, onMove,
 }) {
   const [renaming, setRenaming] = useState(false)
@@ -272,7 +278,17 @@ function ListDetail({
   const { groups, done } = useMemo(
     () => groupListItems(list.items, productsBySku, categoryOrder), [list.items, productsBySku, categoryOrder],
   )
-  const { ready, totalFils } = useMemo(() => cartReadyItems(list.items, productsBySku), [list.items, productsBySku])
+  const { ready } = useMemo(() => cartReadyItems(list.items, productsBySku), [list.items, productsBySku])
+  // Only items the user chose are sent. Nothing is chosen to begin with.
+  const [chosenIds, setChosenIds] = useState(() => new Set())
+  const chosen = useMemo(() => chosenForCart(ready, chosenIds, productsBySku), [ready, chosenIds, productsBySku])
+  const isChosen = (item) => chosen.items.some((other) => other.id === item.id)
+  const canSend = carts.length > 0
+  const toggleChosen = (id) => setChosenIds((current) => {
+    const next = new Set(current)
+    if (!next.delete(id)) next.add(id)
+    return next
+  })
   const openCount = list.items.length - done.length
   const removableDone = done.filter((item) => item.can_delete).length
 
@@ -309,7 +325,7 @@ function ListDetail({
           {list.items.length === 0 ? 'Nothing on this list yet.'
             : openCount === 0 ? 'Everything is ticked off. Nice work!'
               : `${openCount} to get · ${done.length} done`}
-          {' · '}Started by {list.created_by_name}
+          {mine ? ' · Only you can see this list' : ` · Started by ${list.created_by_name}`}
         </p>
         <ProgressBar done={done.length} total={list.items.length} />
       </div>
@@ -327,6 +343,8 @@ function ListDetail({
           <h2>{category} <span>{items.length}</span></h2>
           <ul>
             {items.map((item) => <ListItemRow key={item.id} item={item} product={productsBySku.get(item.sku)}
+              chosen={isChosen(item)}
+              onChoose={canSend && ready.includes(item) ? () => toggleChosen(item.id) : null}
               onToggle={(checked) => onUpdateItem(item, { checked })}
               onQuantity={(quantity) => onUpdateItem(item, { quantity })}
               onNote={(note) => onUpdateItem(item, { note: note || null })}
@@ -353,10 +371,13 @@ function ListDetail({
         </ul>}
       </section>}
 
-      {ready.length > 0 && carts.length > 0 && <div className="move-bar" role="region" aria-label="Send to cart">
+      {ready.length > 0 && canSend && <div className="move-bar" role="region" aria-label="Send to cart">
         <div>
-          <strong>{ready.length} {ready.length === 1 ? 'product' : 'products'} ready</strong>
-          <small>About {money.format(totalFils / 100)}</small>
+          <strong>{chosen.items.length} of {ready.length} chosen</strong>
+          <small>{chosen.items.length ? `About ${money.format(chosen.totalFils / 100)}` : 'Choose the items to send'}</small>
+          <button className="text-button" onClick={() => setChosenIds(
+            chosen.items.length === ready.length ? new Set() : new Set(ready.map((item) => item.id)),
+          )}>{chosen.items.length === ready.length ? 'Clear' : 'Choose all'}</button>
         </div>
         <label className="move-target">
           <span>Send to</span>
@@ -364,8 +385,11 @@ function ListDetail({
             {carts.map((cart) => <option key={cart.id} value={cart.id}>{cart.name}</option>)}
           </select>
         </label>
-        <button disabled={busy || !target} onClick={() => onMove(target, ready.map((item) => item.id))}>
-          Add to cart →
+        <button disabled={busy || !target || chosen.items.length === 0} onClick={() => {
+          onMove(target, chosen.items.map((item) => item.id))
+          setChosenIds(new Set())
+        }}>
+          Add {chosen.items.length || ''} to cart →
         </button>
       </div>}
     </section>
@@ -376,8 +400,28 @@ function ListDetail({
 /* Container: data loading, optimistic updates and live sync               */
 /* ------------------------------------------------------------------------ */
 
-export function ShoppingLists({
-  api, token, household, user, products, carts, defaultCartId, onNotify, onCartChanged, onAccessLost, onBack,
+/** My lists and household lists, kept apart under two tabs. */
+export function ListsPage({ account, api, household, onBack, ...rest }) {
+  const [tab, setTab] = useState('mine')
+  const shared = tab === 'household' && household
+  const tabs = [['mine', 'My lists'], ['household', 'Household lists']]
+  return (
+    <div className="shopping-lists-page">
+      <div className="list-tabs" role="tablist" aria-label="Which lists">
+        {tabs.map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>)}
+      </div>
+      {tab === 'household' && !household ? <div className="list-empty">
+        <span aria-hidden="true">🏠</span>
+        <h2>No household yet</h2>
+        <p>Create or join a household to share lists with your family. Your own lists are under My lists.</p>
+      </div> : <ShoppingLists key={shared ? `household-${household.id}` : 'mine'} {...rest} mine={!shared}
+        api={shared ? api : account} household={household} onBack={onBack} />}
+    </div>
+  )
+}
+
+function ShoppingLists({
+  mine, api, token, household, user, products, carts, defaultCartId, onNotify, onCartChanged, onAccessLost, onBack,
 }) {
   const [lists, setLists] = useState([])
   const [loading, setLoading] = useState(true)
@@ -426,20 +470,22 @@ export function ShoppingLists({
     }
   }, [fail, notify])
 
-  useEffect(() => { setLoading(true); setOpenId(null); setDetail(null); refreshLists() }, [household.id, refreshLists])
+  useEffect(() => { setLoading(true); setOpenId(null); setDetail(null); refreshLists() }, [refreshLists])
 
   // The overview cards follow the open list locally: no extra request after each edit.
   useEffect(() => { if (detail) setLists((current) => upsertListSummary(current, detail)) }, [detail])
 
   // Live channel: every ~30 s the server pushes the lists that changed, already
   // filtered for this viewer. Nothing is fetched per change.
+  const liveHouseholdId = mine ? null : household.id
   useEffect(() => {
+    if (!liveHouseholdId) return  // private lists have nobody to sync with
     let stopped = false
     let socket
     let retry
     let connectedBefore = false
     const connect = () => {
-      socket = connectLists(token, household.id)
+      socket = connectLists(token, liveHouseholdId)
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data)
         if (message.type === 'ready') {
@@ -477,7 +523,7 @@ export function ShoppingLists({
     }
     connect()
     return () => { stopped = true; window.clearTimeout(retry); socket?.close() }
-  }, [token, household.id, refreshLists, refreshDetail, accessLost, notify])
+  }, [token, liveHouseholdId, refreshLists, refreshDetail, accessLost, notify])
 
   async function run(action) {
     setBusy(true)
@@ -621,16 +667,16 @@ export function ShoppingLists({
       {!openId && <div className="page-heading">
         <div>
           <button className="text-button" onClick={onBack}>← Back to groceries</button>
-          <h1>Shopping lists</h1>
-          <p className="muted">Shared with everyone in {household.name}.</p>
+          <h1>{mine ? 'My lists' : 'Household lists'}</h1>
+          <p className="muted">{mine ? 'Private. Only you can see these.' : `Shared with everyone in ${household.name}.`}</p>
         </div>
-        <span className={`live-badge ${live ? 'on' : ''}`} title={liveTitle}>
+        {!mine && <span className={`live-badge ${live ? 'on' : ''}`} title={liveTitle}>
           <span aria-hidden="true" /> {live ? `Synced every ${interval}s` : 'Offline'}
-        </span>
+        </span>}
       </div>}
 
       {!openId ? (
-        <ListsOverview lists={lists} loading={loading} busy={busy} onOpen={openList}
+        <ListsOverview mine={mine} lists={lists} loading={loading} busy={busy} onOpen={openList}
           onCreate={(name) => run(async () => {
             const created = await api.createList(name)
             setOpenId(created.id); setDetail(created)
@@ -639,7 +685,7 @@ export function ShoppingLists({
         <div className="list-detail"><button className="text-button" onClick={back}>← All lists</button>
           <div className="list-card skeleton tall" aria-busy="true" /></div>
       ) : (
-        <ListDetail list={detail} products={products} productsBySku={productsBySku} categoryOrder={categoryOrder}
+        <ListDetail key={detail.id} mine={mine} list={detail} products={products} productsBySku={productsBySku} categoryOrder={categoryOrder}
           carts={carts} defaultCartId={defaultCartId} busy={busy} onBack={back}
           onRename={(name) => run(async () => setDetail(await saving(() => api.renameList(detail.id, name))))}
           onDelete={() => run(async () => {
@@ -655,7 +701,7 @@ export function ShoppingLists({
           onDeleteItem={deleteItem}
           onClearDone={() => run(async () => setDetail(await saving(() => api.clearCheckedItems(detail.id))))}
           onMove={(cartId, itemIds) => run(async () => {
-            const result = await saving(() => api.moveListToCart(detail.id, cartId, itemIds))
+            const result = await saving(() => api.moveListToCart(detail.id, cartId, itemIds, mine ? household.id : null))
             const cartName = carts.find((cart) => cart.id === cartId)?.name ?? 'the cart'
             if (result.moved.length > 0) {
               notify(`Added ${result.moved.length} ${result.moved.length === 1 ? 'product' : 'products'} to ${cartName}.`)

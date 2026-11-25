@@ -101,3 +101,12 @@ test('pasted lists become bulk items', async () => {
     [1, 'oat', 'oat-milk'],
   ])
 })
+
+test('only chosen items that can still be bought are sent to a cart', async () => {
+  const { chosenForCart } = await import('../src/listState.js')
+  const ready = [item('a', { sku: 'milk', quantity: 2 }), item('b', { sku: 'eggs' }), item('c', { sku: 'apples', pending: true })]
+  const send = (...ids) => chosenForCart(ready, new Set(ids), bySku)
+  assert.deepEqual(send().items, [], 'nothing is chosen to begin with')
+  assert.deepEqual(send('a', 'c', 'gone').items.map((row) => row.id), ['a'])
+  assert.equal(send('a').totalFils, 1500)
+})

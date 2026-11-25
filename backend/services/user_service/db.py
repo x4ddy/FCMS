@@ -100,6 +100,16 @@ def transaction(path: DatabaseTarget) -> Iterator[DatabaseConnection]:
             database.commit()
 
 
+def birth_dates(path: DatabaseTarget, user_ids: list[str]) -> dict[str, str]:
+    if not user_ids:
+        return {}
+    marks = ", ".join("?" for _ in user_ids)
+    with closing(connect(path)) as database:
+        return {row["user_id"]: row["date_of_birth"] for row in database.execute(
+            f"SELECT user_id, date_of_birth FROM users WHERE user_id IN ({marks}) AND date_of_birth IS NOT NULL", user_ids,
+        ).fetchall()}
+
+
 def upsert_user(
     database: DatabaseConnection,
     user_id: str,

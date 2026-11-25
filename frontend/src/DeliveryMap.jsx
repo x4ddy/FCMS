@@ -128,8 +128,11 @@ function LeafletMap({ leaflet: L, stores, latitude, longitude, selectedStore, on
   }, [latitude, longitude, stores, editable])
 
   return <>
-    <div className={`delivery-map${editable ? ' editable' : ''}`} ref={container}
-      aria-label="Delivery map with store coverage" />
+    {/* Leaflet adds its own classes to the inner element, including the one that clips the map.
+        React must never rewrite that element's className, so the changing class is on the outside. */}
+    <div className={`delivery-map${editable ? ' editable' : ''}`}>
+      <div className="delivery-map-canvas" ref={container} aria-label="Delivery map with store coverage" />
+    </div>
     {(!tileUrl || tileFailed) && <div className="delivery-map-status">
       <p role="status">Background map tiles are unavailable. Pins and coverage still work.</p>
       {tileUrl && <button type="button" className="text-button" onClick={() => {

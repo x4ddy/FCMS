@@ -124,6 +124,30 @@ function addressApi(token, path) {
   }
 }
 
+/** Shopping lists. My lists and household lists share one shape under different paths. */
+function listApi(token, lists) {
+  const listPath = (id) => `${lists}/${encodeURIComponent(id)}`
+  return {
+    lists: () => request(lists, { token }),
+    createList: (name) => request(lists, { token, method: 'POST', body: { name } }),
+    list: (id) => request(listPath(id), { token }),
+    renameList: (id, name) => request(listPath(id), { token, method: 'PATCH', body: { name } }),
+    deleteList: (id) => request(listPath(id), { token, method: 'DELETE' }),
+    addListItem: (id, item) => request(`${listPath(id)}/items`, { token, method: 'POST', body: item }),
+    addListItems: (id, items) => request(`${listPath(id)}/items/bulk`, { token, method: 'POST', body: { items } }),
+    updateListItem: (id, itemId, changes) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
+      token, method: 'PATCH', body: changes,
+    }),
+    deleteListItem: (id, itemId) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
+      token, method: 'DELETE',
+    }),
+    clearCheckedItems: (id) => request(`${listPath(id)}/items/clear-checked`, { token, method: 'POST' }),
+    moveListToCart: (id, target, itemIds, householdId) => request(`${listPath(id)}/move-to-cart`, {
+      token, method: 'POST', body: { target, item_ids: itemIds, ...(householdId ? { household_id: householdId } : {}) },
+    }),
+  }
+}
+
 export function accountApi(token) {
   if (token) activeAccessToken = token
   return {
@@ -135,10 +159,7 @@ export function accountApi(token) {
     acceptInvitation: (invitationCode, displayName) => request(`${api}/household-invitations/accept`, {
       token, method: 'POST', body: { invitation_code: invitationCode, display_name: displayName },
     }),
-    personalCart: () => request(`${api}/personal-cart`, { token }),
-    adjustPersonalItem: (sku, delta) => request(`${api}/personal-cart/items/${encodeURIComponent(sku)}`, {
-      token, method: 'PATCH', body: { delta },
-    }),
+    ...listApi(token, `${api}/my-lists`),
     products: () => request(`${api}/products`, { token }),
     saveAge: (dateOfBirth) => request(`${api}/auth/age`, {
       token, method: 'POST', body: { date_of_birth: dateOfBirth },
@@ -159,8 +180,6 @@ export function householdApi(token, householdId) {
   const household = `${api}/households/${encodeURIComponent(householdId)}`
   const carts = `${household}/carts`
   const cartPath = (id) => `${carts}/${encodeURIComponent(id)}`
-  const lists = `${household}/lists`
-  const listPath = (id) => `${lists}/${encodeURIComponent(id)}`
   const contributionPath = (id, sku) => `${cartPath(id)}/items/${encodeURIComponent(sku)}/contributions`
   return {
     ...addressApi(token, `${household}/addresses`),
@@ -179,7 +198,13 @@ export function householdApi(token, householdId) {
     changeGrant: (id, member, grant) => request(`${cartPath(id)}/grants/${encodeURIComponent(member)}`, {
       token, method: grant ? 'PUT' : 'DELETE',
     }),
-    products: () => request(`${api}/products`, { token }),
+    // What this household allows, which depends on whether the primary approved the caller's age.
+    products: () => request(`${api}/products?${new URLSearchParams({ household_id: householdId })}`, { token }),
+    shareAddress: (id) => request(`${household}/addresses/share`, { token, method: 'POST', body: { address_id: id } }),
+    decideAge: (memberId, approved) => request(`${household}/members/${encodeURIComponent(memberId)}/age`, {
+      token, method: 'PUT', body: { approved },
+    }),
+    ...listApi(token, `${household}/lists`),
     setQuantity: (id, sku, quantity) => request(`${contributionPath(id, sku)}/me`, {
       token, method: 'PUT', body: { quantity },
     }),
@@ -194,23 +219,6 @@ export function householdApi(token, householdId) {
     }),
     removeContribution: (id, sku, contributor) => request(`${contributionPath(id, sku)}/${encodeURIComponent(contributor)}`, {
       token, method: 'DELETE',
-    }),
-    lists: () => request(lists, { token }),
-    createList: (name) => request(lists, { token, method: 'POST', body: { name } }),
-    list: (id) => request(listPath(id), { token }),
-    renameList: (id, name) => request(listPath(id), { token, method: 'PATCH', body: { name } }),
-    deleteList: (id) => request(listPath(id), { token, method: 'DELETE' }),
-    addListItem: (id, item) => request(`${listPath(id)}/items`, { token, method: 'POST', body: item }),
-    addListItems: (id, items) => request(`${listPath(id)}/items/bulk`, { token, method: 'POST', body: { items } }),
-    updateListItem: (id, itemId, changes) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
-      token, method: 'PATCH', body: changes,
-    }),
-    deleteListItem: (id, itemId) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
-      token, method: 'DELETE',
-    }),
-    clearCheckedItems: (id) => request(`${listPath(id)}/items/clear-checked`, { token, method: 'POST' }),
-    moveListToCart: (id, target, itemIds) => request(`${listPath(id)}/move-to-cart`, {
-      token, method: 'POST', body: { target, item_ids: itemIds },
     }),
   }
 }

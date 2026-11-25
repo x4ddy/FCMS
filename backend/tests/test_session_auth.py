@@ -486,6 +486,8 @@ class RoutePolicyTests(unittest.TestCase):
                              ("POST", "addresses"), ("PATCH", f"{h}/addresses/a1"), ("DELETE", f"{h}/lists/l1"),
                              ("POST", "checkout/quotes"), ("GET", "something/new"), ("GET", "auth/age")):
             self.assertIs(classify(method, path), Level.SENSITIVE, path)
+        self.assertIs(classify("POST", f"{h}/addresses/share"), Level.SENSITIVE)
+        self.assertIs(classify("PUT", f"{h}/members/m1/age"), Level.CRITICAL)
         for method, path in (("DELETE", f"{h}/members/m1"), ("PUT", f"{h}/members/m1/primary"),
                              ("POST", "checkout/orders"), ("POST", "auth/age")):
             self.assertIs(classify(method, path), Level.CRITICAL, path)
@@ -511,6 +513,9 @@ class RoutePolicyTests(unittest.TestCase):
             f"POST {h}/lists", f"PATCH {shopping_list}", f"POST {shopping_list}/items", f"POST {shopping_list}/items/bulk",
             f"POST {shopping_list}/items/clear-checked", f"POST {shopping_list}/move-to-cart",
             f"PATCH {shopping_list}/items/{{item_id}}", f"DELETE {shopping_list}/items/{{item_id}}",
+            "POST my-lists", "PATCH my-lists/{list_id}", "POST my-lists/{list_id}/items", "POST my-lists/{list_id}/items/bulk",
+            "POST my-lists/{list_id}/items/clear-checked", "POST my-lists/{list_id}/move-to-cart",
+            "PATCH my-lists/{list_id}/items/{item_id}", "DELETE my-lists/{list_id}/items/{item_id}",
             "POST addresses/{address_id}/resolve-store", f"POST {h}/addresses/{{address_id}}/resolve-store",
         })
 

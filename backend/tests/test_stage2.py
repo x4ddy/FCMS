@@ -270,7 +270,8 @@ class StageTwoTests(unittest.TestCase):
         self.assertTrue(self.cart.get(f"{HOUSEHOLD}/capabilities", headers=adult).json()["can_create_adults_only_cart"])
         initialize_database(self.db_path)
         listed = self.cart.get(f"{members}?include_roles=true", headers=adult).json()
-        self.assertIn({"id": "user-adult", "display_name": "Demo Adult", "role": "primary", "is_adult": True}, listed)
+        self.assertIn({"id": "user-adult", "display_name": "Demo Adult", "role": "primary", "is_adult": True,
+                       "age_status": "APPROVED"}, listed)
         restored = self.cart.put(f"{members}/user-primary/primary", headers=adult)
         self.assertEqual(restored.status_code, 200)
         self.assertEqual(self.cart.get(f"{members}?include_roles=true", headers=self.primary).status_code, 200)

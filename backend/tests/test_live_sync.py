@@ -124,6 +124,7 @@ class LiveSyncTests(unittest.TestCase):
             self.client.post("/api/v1/household-invitations/accept", headers=headers, json={
                 "invitation_code": code, "display_name": name,
             })
+        self.client.put(f"{self.root}/members/{self.member_id}/age", headers=self.primary, json={"approved": True})
         [self.cart] = self.client.get(f"{self.root}/carts", headers=self.primary).json()
         self.go_online()
         self.sync.tick()  # flush setup changes

@@ -37,7 +37,7 @@ from backend.shared.cache import CACHE_PREFIX, Breaker, sync_client
 from backend.shared.database import DatabaseConnection, DatabaseTarget, database_error_types
 from backend.shared.demo_members import MEMBERS_BY_ID
 
-from .db import ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, transaction
+from .db import ADDRESS_FIELDS, ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, transaction
 
 logger = logging.getLogger(__name__)
 SYNC_ERRORS = (RedisError,) + database_error_types()
@@ -124,7 +124,8 @@ def build_snapshots(
 
     for row in db.execute(
         f"""SELECT members.household_id, members.user_id, members.active,
-                   household.created_by AS owner_id, profiles.display_name, profiles.is_adult
+                   household.created_by AS owner_id, profiles.display_name, profiles.is_adult,
+                   profiles.age_status
             FROM household_members AS members
             JOIN household_profiles AS household ON household.household_id = members.household_id
             LEFT JOIN household_member_profiles AS profiles
@@ -137,6 +138,7 @@ def build_snapshots(
             "household_id": row["household_id"], "owner_id": row["owner_id"],
             "owner_name": "the primary account holder", "revision": None, "members": [],
             "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "lists": [],
+            "addresses": [],
         })
         fixture = MEMBERS_BY_ID.get(row["user_id"])
         fixture_adult = bool(fixture and fixture.identity.is_adult)
@@ -148,6 +150,7 @@ def build_snapshots(
             # Same fallbacks as the REST member list and grant checks.
             "is_adult": bool(profile_adult) if profile_adult is not None else fixture_adult,
             "grant_adult": profile_adult == 1 or fixture_adult,
+            "age_status": row["age_status"] or "APPROVED",
         })
         if row["user_id"] == row["owner_id"] and row["display_name"]:
             snapshot["owner_name"] = row["display_name"]
@@ -156,6 +159,14 @@ def build_snapshots(
     if not present:
         return {}, []
     marks = _placeholders(present)
+
+    for row in db.execute(
+        f"""SELECT household_id, {ADDRESS_FIELDS}, created_by, source_address_id FROM household_addresses
+            WHERE household_id IN ({marks}) ORDER BY created_at, id""",
+        present,
+    ):
+        address = dict(row)
+        snapshots[address.pop("household_id")]["addresses"].append(address)
 
     carts_by_id = {}
     for row in db.execute(

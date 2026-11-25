@@ -131,3 +131,10 @@ export function parsePastedList(text, products, limit = 50) {
       return { quantity: Math.min(quantity, 999), text: name.slice(0, 120), product }
     })
 }
+
+/** The chosen items that can still be sent to a cart, and what they cost. */
+export function chosenForCart(ready, chosenIds, productsBySku) {
+  const items = ready.filter((item) => chosenIds.has(item.id) && !item.pending)
+  const totalFils = items.reduce((total, item) => total + productsBySku.get(item.sku).price_fils * item.quantity, 0)
+  return { items, totalFils }
+}

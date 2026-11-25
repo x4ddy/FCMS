@@ -242,7 +242,7 @@ function SavedAddressMap({ address, api, canEdit, busy, onUpdatePin, onClose }) 
 }
 
 export function AddressBook({ addresses, api, displayName, busy, onSave, onDelete, onUpdatePin,
-  canEdit = () => true, buttonLabel = 'Save address' }) {
+  canEdit = () => true, buttonLabel = 'Save address', extraAction }) {
   const [selectedId, setSelectedId] = useState(null)
   return <>
     <AddressForm api={api} busy={busy} displayName={displayName} onSave={onSave} buttonLabel={buttonLabel} />
@@ -258,6 +258,7 @@ export function AddressBook({ addresses, api, displayName, busy, onSave, onDelet
               onClick={() => setSelectedId(selected ? null : address.id)}>
               {address.latitude == null && editable ? 'Add map pin' : 'Check coverage'}
             </button>
+            {extraAction?.(address)}
             {onDelete && editable && <button className="secondary danger" disabled={busy}
               onClick={() => onDelete(address.id)}>Remove</button>}
           </div>

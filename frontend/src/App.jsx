@@ -6,7 +6,7 @@ import {
 } from './api.js'
 import { CartDetail } from './CartDetail.jsx'
 import { AddressBook } from './AddressBook.jsx'
-import { ShoppingLists } from './ShoppingLists.jsx'
+import { ListsPage } from './ShoppingLists.jsx'
 import { applyCartSnapshot, cartActivity } from './cartState.js'
 import { Checkout, OrderConfirmation } from './Checkout.jsx'
 import { OrderHistory } from './OrderHistory.jsx'
@@ -139,7 +139,7 @@ function GoogleAuthModal({ busy, onClose, onAuthenticated }) {
 
 function GroceryPage({
   products, busy, quantities, canEditCart, canOpenCart, householdCarts, activeCartId,
-  onSelectCart, onAdjust, onOpenCart,
+  onSelectCart, onAdjust, onOpenCart, needsHousehold, onSetUpHousehold,
 }) {
   const [query, setQuery] = useState('')
   const itemCount = Object.values(quantities).reduce((total, quantity) => total + quantity, 0)
@@ -174,13 +174,18 @@ function GroceryPage({
             {householdCarts.map((cart) => <option key={cart.id} value={cart.id}>{cart.name}</option>)}
           </select>
         </label>}
-        <button className="cart-summary" disabled={busy || itemCount === 0 || !canOpenCart} onClick={onOpenCart}
+        {!needsHousehold && <button className="cart-summary" disabled={busy || itemCount === 0 || !canOpenCart} onClick={onOpenCart}
           aria-label={`Open cart with ${itemCount} items`}>
           <span className="cart-summary-icon" aria-hidden="true">🛒</span>
           <span><strong>{itemCount} {itemCount === 1 ? 'item' : 'items'}</strong>
             <small>{money.format(cartTotal / 100)}</small></span>
-        </button>
+        </button>}
       </div>
+      {needsHousehold && <div className="household-prompt">
+        <div><strong>Create or join a household to start shopping</strong>
+          <p>Products are added to a household cart. You can use My lists in the meantime.</p></div>
+        <button onClick={onSetUpHousehold}>Set up household</button>
+      </div>}
       {groups.length === 0 && <p className="empty">No groceries match your search.</p>}
       {groups.map(([category, items]) => (
         <section className="product-section" key={category}>
@@ -192,66 +197,18 @@ function GroceryPage({
                 <small>◷ 19 MINS</small>
                 <h3>{product.name}</h3>
                 <p>{money.format(product.price_fils / 100)}</p>
-                <div className="product-stepper" aria-label={`Quantity for ${product.name}`}>
+                {!needsHousehold && <div className="product-stepper" aria-label={`Quantity for ${product.name}`}>
                   <button className="secondary" disabled={busy || !canEditCart || !quantities[product.sku]}
                     onClick={() => onAdjust(product, -1)} aria-label={`Remove one ${product.name}`}>−</button>
                   <strong>{quantities[product.sku] ?? 0}</strong>
                   <button className="secondary" disabled={busy || !canEditCart}
                     onClick={() => onAdjust(product, 1)} aria-label={`Add one ${product.name}`}>+</button>
-                </div>
+                </div>}
               </article>
             ))}
           </div>
         </section>
       ))}
-    </section>
-  )
-}
-
-function PersonalCartView({ products, quantities, busy, onBack, onAdjust, onCheckout }) {
-  const selected = products.filter((product) => (quantities[product.sku] ?? 0) > 0)
-  const total = selected.reduce(
-    (sum, product) => sum + product.price_fils * quantities[product.sku],
-    0,
-  )
-  return (
-    <section className="personal-cart-page">
-      <button className="text-button" onClick={onBack}>← Continue shopping</button>
-      <div className="page-heading">
-        <div><h1>My cart</h1><p className="muted">Your personal shopping cart</p></div>
-        <strong className="cart-grand-total">{money.format(total / 100)}</strong>
-      </div>
-      {selected.length === 0 ? <p className="empty">Your cart is empty.</p> : (
-        <div className="personal-cart-layout">
-          <ul className="personal-cart-items">
-            {selected.map((product) => {
-              const quantity = quantities[product.sku]
-              return <li key={product.sku}>
-                <img src={product.image_url} alt="" />
-                <div className="personal-cart-product">
-                  <strong>{product.name}</strong>
-                  <small>{money.format(product.price_fils / 100)} each</small>
-                </div>
-                <div className="product-stepper">
-                  <button className="secondary" disabled={busy}
-                    onClick={() => onAdjust(product, -1)} aria-label={`Remove one ${product.name}`}>−</button>
-                  <strong>{quantity}</strong>
-                  <button className="secondary" disabled={busy}
-                    onClick={() => onAdjust(product, 1)} aria-label={`Add one ${product.name}`}>+</button>
-                </div>
-                <strong className="line-total">{money.format(product.price_fils * quantity / 100)}</strong>
-              </li>
-            })}
-          </ul>
-          <aside className="panel cart-bill">
-            <h2>Bill details</h2>
-            <div><span>Items total</span><strong>{money.format(total / 100)}</strong></div>
-            <div><span>Delivery</span><strong>Calculated at checkout</strong></div>
-            <div className="bill-total"><span>Total</span><strong>{money.format(total / 100)}</strong></div>
-            <button disabled={busy} onClick={onCheckout}>Checkout</button>
-          </aside>
-        </div>
-      )}
     </section>
   )
 }
@@ -285,24 +242,30 @@ function HouseholdSetup({ busy, displayName, onCreate, onJoin }) {
   )
 }
 
-function PersonalAddresses({ required = false, onBack, ...addressBook }) {
+function PersonalAddresses({ required = false, onBack, household, sharedAddresses = [], onShare, onStopSharing, ...addressBook }) {
+  const shareAction = household && onShare ? (address) => {
+    const shared = sharedAddresses.find((other) => other.source_address_id === address.id)
+    return shared
+      ? <button type="button" className="secondary" disabled={addressBook.busy} onClick={() => onStopSharing(shared.id)}>Stop sharing</button>
+      : <button type="button" disabled={addressBook.busy} onClick={() => onShare(address.id)}>Share with {household.name}</button>
+  } : undefined
   return <section className="household-dashboard">
     <div className="page-heading"><div>
       {!required && <button className="text-button" onClick={onBack}>Back to groceries</button>}
       <h1>{required ? 'Add your delivery address' : 'Your addresses'}</h1>
       <p className="muted">{required
         ? 'A delivery address is required before you start shopping.'
-        : 'Save multiple addresses and choose one when placing an order.'}</p>
+        : 'Private to you. Share one to let your household deliver to it.'}</p>
     </div></div>
     <section className="panel dashboard-addresses">
-      <AddressBook {...addressBook} buttonLabel={required ? 'Save and start shopping' : 'Add address'} />
+      <AddressBook {...addressBook} extraAction={shareAction} buttonLabel={required ? 'Save and start shopping' : 'Add address'} />
     </section>
   </section>
 }
 
 function HouseholdDashboard({
   household, households, session, carts, members, addresses, busy, invitation, onBack, onCreate,
-  onJoin, onSelectHousehold, onInvite, onRevoke, onTransferHousehold, onAddress,
+  onJoin, onSelectHousehold, onInvite, onRevoke, onDecideAge, onTransferHousehold, onAddress,
   onDeleteAddress, onUpdatePin, addressApi, onOpenCart, onShopCart, onCreateCart, onDeleteCart, onOpenLists,
 }) {
   const [cartName, setCartName] = useState('')
@@ -324,6 +287,14 @@ function HouseholdDashboard({
         <HouseholdSetup busy={busy} displayName={session.user.display_name} onCreate={onCreate} onJoin={onJoin} />
       ) : (
         <div className="dashboard-grid">
+          {session.age_status === 'PENDING' && <div className="age-banner" role="status"><div>
+            <strong>Your age is waiting for approval</strong>
+            <p>The primary account holder checks it. Until then this household treats you as under 18.</p>
+          </div></div>}
+          {session.age_status === 'REJECTED' && <div className="age-banner" role="status"><div>
+            <strong>Your age was not approved</strong>
+            <p>This household treats you as under 18. Contact the primary account holder if this is wrong.</p>
+          </div></div>}
           <section className="panel dashboard-members">
             <div className="section-title"><h2>Family members</h2>
               {household.role === 'primary' && <button onClick={onInvite} disabled={busy}>Invite member</button>}
@@ -334,8 +305,16 @@ function HouseholdDashboard({
             </div>}
             <ul className="rows">
               {members.map((member) => <li key={member.id}>
-                <div><strong>{member.display_name}</strong><small>{member.role}</small></div>
+                <div><strong>{member.display_name}</strong>
+                  {member.age_status === 'PENDING' && <span className="age-chip">
+                    Age check{member.claimed_age != null ? `: says ${member.claimed_age}` : ' waiting'}</span>}
+                  {member.age_status === 'REJECTED' && <span className="age-chip rejected">Age not approved</span>}
+                  <small>{member.role}</small></div>
                 {household.role === 'primary' && member.role !== 'primary' && <div className="row-actions">
+                  {session.is_adult && ['PENDING', 'REJECTED'].includes(member.age_status) &&
+                    <button disabled={busy} onClick={() => onDecideAge(member.id, true)}>Approve age</button>}
+                  {session.is_adult && member.age_status === 'PENDING' &&
+                    <button className="secondary danger" disabled={busy} onClick={() => onDecideAge(member.id, false)}>Reject age</button>}
                   <button className="secondary" disabled={busy} onClick={() => {
                     if (window.confirm(`Transfer household ownership to ${member.display_name}?`)) {
                       onTransferHousehold(member.id)
@@ -381,8 +360,8 @@ function HouseholdDashboard({
           </section>
           <section className="panel dashboard-lists">
             <div>
-              <h2>Shared shopping lists</h2>
-              <p className="muted">Plan together, tick items off, then send them to a cart in one tap.</p>
+              <h2>Household shopping lists</h2>
+              <p className="muted">Plan together, tick items off, then send the items you choose to a cart.</p>
             </div>
             <button onClick={onOpenLists}>Open lists →</button>
           </section>
@@ -424,7 +403,6 @@ function App() {
   const [addresses, setAddresses] = useState([])
   const [personalAddresses, setPersonalAddresses] = useState([])
   const [quantities, setQuantities] = useState({})
-  const [personalQuantities, setPersonalQuantities] = useState({})
   const [invitation, setInvitation] = useState(null)
   const [detail, setDetail] = useState(null)
   const [shoppingCartId, setShoppingCartId] = useState(null)
@@ -449,7 +427,6 @@ function App() {
   const householdId = household?.id
   const account = useMemo(() => token ? accountApi(token) : null, [token])
   const api = useMemo(() => token && householdId ? householdApi(token, householdId) : null, [token, householdId])
-  const displayQuantities = household ? quantities : personalQuantities
 
   useEffect(() => {
     productNames.current = new Map(products.map((product) => [product.sku, product.name]))
@@ -472,7 +449,7 @@ function App() {
     currentUser.current = null
     setSession(null); setHousehold(null); setHouseholds([]); setCarts([]); setProducts([]); setMembers([])
     setAddresses([]); setPersonalAddresses([]); setQuantities({}); setInvitation(null); setDetail(null); setShoppingCartId(null)
-    setPersonalQuantities({}); setCheckoutCart(null); setPendingOrder(null); setConfirmation(null); setOrderError(null)
+    setCheckoutCart(null); setPendingOrder(null); setConfirmation(null); setOrderError(null)
     setCartNotices([]); setView('shop')
   }
 
@@ -488,12 +465,15 @@ function App() {
   async function loadHousehold(selected, accessToken = token, user = session?.user) {
     if (!selected) {
       setHousehold(null); setCarts([]); setMembers([]); setAddresses([]); setShoppingCartId(null)
+      setProducts(await accountApi(accessToken).products())
+      setSession((current) => current && { ...current, is_adult: current.user.is_adult, age_status: undefined })
       return
     }
     const selectedApi = householdApi(accessToken, selected.id)
-    const [visibleCarts, capabilities, savedAddresses] = await Promise.all([
-      selectedApi.carts(), selectedApi.capabilities(), selectedApi.addresses(),
+    const [visibleCarts, capabilities, savedAddresses, visibleProducts] = await Promise.all([
+      selectedApi.carts(), selectedApi.capabilities(), selectedApi.addresses(), selectedApi.products(),
     ])
+    setProducts(visibleProducts)
     const visibleMembers = selected.role === 'primary' ? await selectedApi.members() : []
     setHousehold(selected); setCarts(visibleCarts); setMembers(visibleMembers); setAddresses(savedAddresses)
     const initialCart = visibleCarts.find((cart) => !cart.adults_only) ?? visibleCarts[0]
@@ -514,16 +494,13 @@ function App() {
       return
     }
     const signedInAccount = accountApi(signedIn.access_token)
-    const [visibleHouseholds, visibleProducts, personalCart, savedPersonalAddresses] = await Promise.all([
-      signedInAccount.households(), signedInAccount.products(), signedInAccount.personalCart(),
-      signedInAccount.addresses(),
+    const [visibleHouseholds, savedPersonalAddresses] = await Promise.all([
+      signedInAccount.households(), signedInAccount.addresses(),
     ])
     currentUser.current = signedIn.user.id
     setSession(signedIn)
     setHouseholds(visibleHouseholds)
     setPersonalAddresses(savedPersonalAddresses)
-    setProducts(visibleProducts)
-    setPersonalQuantities(Object.fromEntries(personalCart.items.map((item) => [item.sku, item.quantity])))
     setPendingOrder(readAttempt(signedIn.user.id))
     await loadHousehold(visibleHouseholds[0] ?? null, signedIn.access_token, signedIn.user)
     if (savedPersonalAddresses.length === 0) setView('address-onboarding')
@@ -566,9 +543,14 @@ function App() {
           setSession((current) => current && {
             ...current,
             can_create_adults_only_cart: snapshot.can_create_adults_only_cart,
+            is_adult: snapshot.is_adult, age_status: snapshot.age_status,
           })
         }
-        if (snapshot.members) setMembers(snapshot.members)
+        if (snapshot.members) setMembers((current) => snapshot.members.map((member) => ({
+          // Claimed ages come from the member list, not from live updates.
+          ...member, claimed_age: current.find((other) => other.id === member.id)?.claimed_age,
+        })))
+        if (snapshot.addresses) setAddresses(snapshot.addresses)
         if (snapshot.cart === null && liveCartId) {
           previousContributions = null
           if (cartId) setDetail(null)
@@ -606,9 +588,9 @@ function App() {
           }
         }
         else if (code === 4404) {
-          const personalCart = await accountApi(token).personalCart().catch(() => ({ items: [] }))
-          setHousehold(null); setCarts([]); setMembers([]); setAddresses([]); setDetail(null)
-          setPersonalQuantities(Object.fromEntries(personalCart.items.map((item) => [item.sku, item.quantity])))
+          setHouseholds((current) => current.filter((item) => item.id !== household.id))
+          setDetail(null); setCheckoutCart(null); setQuantities({})
+          loadHousehold(null).catch(() => {})
           setView('shop')
           showPopup(reason || 'Your household access was revoked. Contact the primary account holder.', 'error')
         }
@@ -634,6 +616,23 @@ function App() {
     // message carries that cart's current contents.
     setShoppingCartId(fallback.id)
   }, [household?.id, carts, shoppingCartId])
+
+  // Which products may be seen can change when the primary decides on an age.
+  useEffect(() => {
+    if (!api || session?.is_adult === undefined) return
+    let cancelled = false
+    api.products().then((visible) => { if (!cancelled) setProducts(visible) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [api, session?.is_adult])
+
+  // Ask for claimed ages when someone new is waiting for a decision.
+  const unknownAges = household?.role !== 'primary' ? '' : members
+    .filter((member) => member.age_status === 'PENDING' && member.claimed_age === undefined).map((member) => member.id).join()
+  useEffect(() => {
+    if (!api || !unknownAges) return
+    api.members().then((listed) => setMembers(listed.map((member) => ({ ...member, claimed_age: member.claimed_age ?? null }))))
+      .catch(() => {})
+  }, [api, unknownAges])
 
   useEffect(() => {
     function handlePopState() {
@@ -709,14 +708,7 @@ function App() {
     if (currentUser.current !== userId) return
     resolveOrder(placed.order_id)
     setConfirmation(placed)
-    if (attempt.cart.kind === 'personal') {
-      setPersonalQuantities({})
-      account.personalCart().then(({ items }) => {
-        if (currentUser.current === userId) {
-          setPersonalQuantities(Object.fromEntries(items.map((item) => [item.sku, item.quantity])))
-        }
-      }).catch(() => {})
-    } else if (attempt.cart.household_id === householdId) {
+    if (attempt.cart.household_id === householdId) {
       const placedCart = attempt.cart.cart_id
       setDetail((current) => current?.cart.id === placedCart
         ? { ...current, cart: { ...current.cart, contributions: [] } } : current)
@@ -761,64 +753,47 @@ function App() {
     setView('shop')
   }
 
-  // Fast + / − taps on the same product are combined into one request. Each entry
-  // remembers its cart: 'shared' (the household cart being shopped) or 'personal'.
-  const tapKey = (target, sku) => `${target}:${sku}`
-
-  function waitingTaps(target, sku) {
-    return pendingTaps.current.get(tapKey(target, sku))?.delta ?? 0
-  }
-
+  // Fast + / − taps on the same product are combined into one request.
   /** Add taps that have not been sent yet on top of quantities from the server. */
-  function withPendingTaps(quantities, target = 'shared') {
-    const next = { ...quantities }
-    for (const entry of pendingTaps.current.values()) {
-      if (entry.target !== target) continue
-      next[entry.product.sku] = Math.max(0, (next[entry.product.sku] ?? 0) + entry.delta)
+  function withPendingTaps(current) {
+    const next = { ...current }
+    for (const { product, delta } of pendingTaps.current.values()) {
+      next[product.sku] = Math.max(0, (next[product.sku] ?? 0) + delta)
     }
     return next
   }
 
   /** Show a tap immediately; send all taps on the same product as one request after a short pause. */
-  function queueAdjust(product, delta, target = household ? 'shared' : 'personal') {
-    const key = tapKey(target, product.sku)
-    const entry = pendingTaps.current.get(key) ?? { delta: 0, product, target }
+  function queueAdjust(product, delta) {
+    const entry = pendingTaps.current.get(product.sku) ?? { delta: 0, product }
     entry.delta = Math.max(-99, Math.min(99, entry.delta + delta))
-    const setDisplayed = target === 'personal' ? setPersonalQuantities : setQuantities
-    setDisplayed((current) => ({ ...current, [product.sku]: Math.max(0, (current[product.sku] ?? 0) + delta) }))
+    setQuantities((current) => ({ ...current, [product.sku]: Math.max(0, (current[product.sku] ?? 0) + delta) }))
     window.clearTimeout(entry.timer)
-    entry.timer = window.setTimeout(() => flushTaps(key), 400)
-    pendingTaps.current.set(key, entry)
+    entry.timer = window.setTimeout(() => flushTaps(product.sku), 400)
+    pendingTaps.current.set(product.sku, entry)
   }
 
-  async function flushTaps(key) {
-    const entry = pendingTaps.current.get(key)
-    pendingTaps.current.delete(key)
+  async function flushTaps(sku) {
+    const entry = pendingTaps.current.get(sku)
+    pendingTaps.current.delete(sku)
     if (!entry || entry.delta === 0) return
     try {
-      if (entry.target === 'personal') await adjustPersonalProduct(entry.product, entry.delta)
-      else await adjustProduct(entry.product, entry.delta)
+      await adjustProduct(entry.product, entry.delta)
     } catch (error) {
       if (error.status === 401) { clearSession(); return }
       if (error.status === 403) showPopup(error.message, 'error')
       else setFeedback({ error: true, text: error.message })
       // Put the screen back in line with what was actually saved.
       try {
-        if (entry.target === 'shared' && household && shoppingCartId) {
+        if (household && shoppingCartId) {
           const cart = await api.cart(shoppingCartId)
-          setQuantities(withPendingTaps(sharedCartQuantities(cart.contributions), 'shared'))
-        } else if (entry.target === 'personal' && account) {
-          const personalCart = await account.personalCart()
-          setPersonalQuantities(withPendingTaps(
-            Object.fromEntries(personalCart.items.map((item) => [item.sku, item.quantity])), 'personal',
-          ))
+          setQuantities(withPendingTaps(sharedCartQuantities(cart.contributions)))
         }
       } catch { /* the next live update will correct it */ }
     }
   }
 
   async function adjustProduct(product, delta) {
-    if (!household) return adjustPersonalProduct(product, delta)
     let cart = carts.find((candidate) => candidate.id === shoppingCartId)
       ?? carts.find((candidate) => !candidate.adults_only)
     if (!cart) {
@@ -828,14 +803,8 @@ function App() {
     }
     const update = await api.adjustSharedQuantity(cart.id, product.sku, delta)
     // Taps made while this request was running are still waiting; keep them on top.
-    const waiting = waitingTaps('shared', product.sku)
+    const waiting = pendingTaps.current.get(product.sku)?.delta ?? 0
     setQuantities((current) => ({ ...current, [product.sku]: Math.max(0, update.quantity + waiting) }))
-  }
-
-  async function adjustPersonalProduct(product, delta) {
-    const update = await account.adjustPersonalItem(product.sku, delta)
-    const waiting = waitingTaps('personal', product.sku)
-    setPersonalQuantities((current) => ({ ...current, [product.sku]: Math.max(0, update.quantity + waiting) }))
   }
 
   function checkoutAddressBook(addressApi, saved, setSaved) {
@@ -881,7 +850,6 @@ function App() {
               startCheckout(pendingOrder.cart)
             }}>Resume checkout</button>}
             {!needsAgeSetup && <>
-              <button className="secondary" onClick={() => openPage('personal-cart')}>My cart</button>
               <button className="secondary" onClick={() => openPage('orders')}>Order history</button>
               <button className="secondary" onClick={() => openPage('addresses')}>Addresses</button>
             </>}
@@ -890,7 +858,7 @@ function App() {
               clearSession()
             })}>Sign out</button></div> :
             !restoringSession && <button className="header-login" onClick={() => setAuthOpen(true)}>Login / Register</button>}
-          {session && household && !needsAgeSetup && <button className="header-lists" onClick={() => openPage('lists')}>
+          {session && !needsAgeSetup && <button className="header-lists" onClick={() => openPage('lists')}>
             📝 Lists
           </button>}
           {session && !needsAgeSetup && <button className="header-household" onClick={() => openPage('household')}>
@@ -927,7 +895,7 @@ function App() {
               error={orderError} onBack={() => openPage('orders')} /> :
           checkoutCart ?
             <Checkout account={account} cart={checkoutCart} pending={pendingOrder} onPlace={submitOrder}
-              onOpenOrder={resolveOrder} isAdult={session.user.is_adult}
+              onOpenOrder={resolveOrder} isAdult={session.is_adult ?? session.user.is_adult}
               allowed={!sharedCheckout || (householdId === checkoutCart.household_id && household.role === 'primary'
                 && detail?.cart.id === checkoutCart.cart_id && detail.cart.can_manage_access)}
               contributions={sharedCheckout ? detail?.cart.contributions ?? [] : []}
@@ -950,7 +918,17 @@ function App() {
               })} /> :
           view === 'addresses' ?
             <PersonalAddresses addresses={personalAddresses} api={account} displayName={session.user.display_name} busy={busy}
-              onBack={() => setView('shop')}
+              onBack={() => setView('shop')} household={household} sharedAddresses={addresses}
+              onShare={(id) => run(async () => {
+                const shared = await api.shareAddress(id)
+                setAddresses((current) => [...current.filter((other) => other.id !== shared.id), shared])
+                setFeedback({ text: `Shared with ${household.name}.` })
+              })}
+              onStopSharing={(id) => run(async () => {
+                await api.deleteAddress(id)
+                setAddresses((current) => current.filter((other) => other.id !== id))
+                setFeedback({ text: 'No longer shared. The address stays in your own list.' })
+              })}
               onSave={(address) => run(async () => {
                 const saved = await account.createAddress(address)
                 setPersonalAddresses((current) => [...current, saved])
@@ -961,6 +939,8 @@ function App() {
               onDelete={(id) => run(async () => {
                 await account.deleteAddress(id)
                 setPersonalAddresses(await account.addresses())
+                // Its shared copy goes with it.
+                setAddresses((current) => current.filter((other) => other.source_address_id !== id))
               })} /> :
           detail ? <>
             <button className="secondary back" onClick={() => setDetail(null)}>← Back to shopping</button>
@@ -982,8 +962,8 @@ function App() {
                   setQuantities({})
                 }
               })} />
-          </> : view === 'lists' && household ?
-            <ShoppingLists api={api} token={token} household={household} user={session.user} products={products}
+          </> : view === 'lists' ?
+            <ListsPage account={account} api={api} token={token} household={household} user={session.user} products={products}
               carts={carts} defaultCartId={shoppingCartId} onBack={() => setView('shop')}
               onNotify={(text, kind) => showPopup(text, kind)}
               onCartChanged={async (id) => {
@@ -996,12 +976,7 @@ function App() {
                 setView('shop')
                 showPopup(reason || 'Your household access was revoked. Contact the primary account holder.', 'error')
               }} />
-          : view === 'personal-cart' ?
-            <PersonalCartView products={products} quantities={personalQuantities} busy={busy}
-              onBack={() => setView('shop')}
-              onCheckout={() => startCheckout({ kind: 'personal' })}
-              onAdjust={(product, delta) => queueAdjust(product, delta, 'personal')} /> :
-          view === 'household' ?
+          :           view === 'household' ?
             <HouseholdDashboard household={household} households={households} session={session} carts={carts} members={members}
               addresses={addresses} addressApi={api} busy={busy} invitation={invitation} onBack={() => setView('shop')}
               onCreate={(name) => run(async () => {
@@ -1017,6 +992,11 @@ function App() {
               onSelectHousehold={(id) => run(() => loadHousehold(households.find((item) => item.id === id)))}
               onInvite={() => run(async () => setInvitation(await api.createInvitation()))}
               onRevoke={(id) => run(async () => { await api.revokeMember(id); await refreshMembers() })}
+              onDecideAge={(id, approved) => run(async () => {
+                await api.decideAge(id, approved)
+                await refreshMembers()
+                setFeedback({ text: approved ? 'Age approved.' : 'Age not approved.' })
+              })}
               onTransferHousehold={(id) => run(async () => {
                 await api.transferHouseholdOwnership(id)
                 const updated = await account.households()
@@ -1056,16 +1036,16 @@ function App() {
                 }
                 setFeedback({ text: 'Cart deleted.' })
               })} /> :
-            <GroceryPage products={products} busy={busy} quantities={displayQuantities}
-              canEditCart={!household || carts.find((cart) => cart.id === shoppingCartId)?.can_edit_items !== false}
-              canOpenCart={Object.values(displayQuantities).some((quantity) => quantity > 0)}
+            <GroceryPage products={products} busy={busy} quantities={quantities}
+              needsHousehold={!household} onSetUpHousehold={() => openPage('household')}
+              canEditCart={carts.find((cart) => cart.id === shoppingCartId)?.can_edit_items !== false}
+              canOpenCart={Object.values(quantities).some((quantity) => quantity > 0)}
               householdCarts={household ? carts : []} activeCartId={shoppingCartId}
               onSelectCart={(id) => run(() => selectShoppingCart(id))}
               onAdjust={queueAdjust}
               onOpenCart={() => {
                 const cart = carts.find((candidate) => candidate.id === shoppingCartId)
                 if (cart) run(() => openCart(cart.id))
-                else setView('personal-cart')
               }} />}
       </main>
       {authOpen && !restoringSession && !session && <GoogleAuthModal busy={busy} onClose={() => setAuthOpen(false)}
