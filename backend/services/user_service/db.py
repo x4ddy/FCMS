@@ -3,7 +3,9 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from backend.shared.database import DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target
+from backend.shared.database import (
+    DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target, uses_supabase_schema,
+)
 
 
 def database_path() -> DatabaseTarget:
@@ -24,6 +26,8 @@ def connect(path: DatabaseTarget) -> DatabaseConnection:
 
 
 def initialize_database(path: DatabaseTarget) -> None:
+    if uses_supabase_schema(path, "familycart_identity"):
+        return
     if is_postgres_target(path):
         schema = (Path(__file__).parent / "postgres_schema.sql").read_text(encoding="utf-8")
         with closing(connect(path)) as database:
