@@ -30,6 +30,7 @@ Install Python 3.13, Node.js 22.12+ (or 20.19+ on the 20.x line), and Docker Des
 1. Create a root `.env` from [`.env.example`](.env.example) if you are setting up the project for the first time.
 2. Run `python -c "import secrets; print(secrets.token_hex(32))"` and put the generated value in `FAMILYCART_JWT_SECRET`.
 3. Set `FAMILYCART_GOOGLE_CLIENT_ID` and `VITE_GOOGLE_CLIENT_ID` to the same Google OAuth **Web application** client ID. Add `http://127.0.0.1:5173` to that client’s authorized JavaScript origins. [Google Sign-In setup](https://developers.google.com/identity/gsi/web/guides/get-google-api-clientid)
+4. Set the two Supabase service connection URLs in the root `.env` as described under [Supabase PostgreSQL](#supabase-postgresql).
 
 Double-click **Run-FamilyCart.cmd**, or run this from the repository root:
 
@@ -37,9 +38,9 @@ Double-click **Run-FamilyCart.cmd**, or run this from the repository root:
 .\Run-FamilyCart.cmd
 ```
 
-The launcher loads the root `.env`, starts the PostgreSQL and Redis containers through Docker Compose, and opens [FamilyCart](http://127.0.0.1:5173) when the gateway, services, and frontend are ready. The first launch may install packages and pull Docker images. To run without opening a browser, pass `--no-browser`.
+The launcher loads the root `.env`, connects the backend to Supabase PostgreSQL, starts Redis through Docker Compose, and opens [FamilyCart](http://127.0.0.1:5173) when the gateway, services, and frontend are ready. The first launch may install packages and pull Docker images. To run without opening a browser, pass `--no-browser`.
 
-Keep the launcher window open while using the app. Press **Ctrl+C** to stop the app processes. The data containers stay running. If you update the backend code or change `.env`, restart the launcher to load the changes.
+Keep the launcher window open while using the app. Press **Ctrl+C** to stop the app processes. The Redis container stays running. If you update the backend code or change `.env`, restart the launcher to load the changes.
 
 ## Manual setup
 
@@ -54,42 +55,59 @@ cd ..
 
 Set up the root `.env` as shown above. When launching services manually, export the backend settings to each service’s terminal. Vite reads frontend settings from the root `.env`.
 
-## Docker data services
+## Local Redis
 
-Local development uses two PostgreSQL databases and one persistent Redis instance:
-
-| Container | Purpose | Host port |
-|---|---|---|
-| `user-db` | Google identities and refresh sessions | `5433` |
-| `familycart-db` | Households, addresses, carts, quotes, inventory, and placed orders | `5434` |
-| `redis` | Buffered live-cart synchronization and Pub/Sub | `6379` |
-
-Start all data services from the repository root:
+Docker Compose runs Redis on `127.0.0.1:6379` for live cart updates and session caching. For a manual launch, start Redis from the repository root:
 
 ```powershell
-docker compose up -d --wait
-docker compose ps
+docker compose up -d --wait redis
 ```
 
-The named Docker volumes preserve data when containers restart. Stop the containers without deleting data using:
+The former PostgreSQL services are available under the `legacy-postgres` Compose profile for accessing existing local data.
 
-```powershell
-docker compose down
-```
+## Supabase PostgreSQL
 
-Do not add `-v` unless you intentionally want to delete all local database data.
+The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_identity` schema holds users and refresh sessions. The `familycart_shopping` schema holds households, carts, lists, addresses, inventory, checkout, and orders. Each backend login can read and write its own schema. Keep both schemas private in the project's Data API settings. Google sign-in still goes through FastAPI, and Redis handles live updates.
 
-Set these values in every backend terminal before starting a service:
+1. For a new project, run [the FamilyCart baseline](supabase/migrations/20261125055724_familycart.sql) as the project administrator in one transaction. With an administrator connection open in `psql` from the repository root, run the following:
 
-```powershell
-$env:FAMILYCART_USER_DATABASE_URL='postgresql://familycart_user:familycart_local_password@127.0.0.1:5433/familycart_users'
-$env:FAMILYCART_DATABASE_URL='postgresql://familycart_app:familycart_local_password@127.0.0.1:5434/familycart'
-$env:FAMILYCART_REDIS_URL='redis://127.0.0.1:6379/0'
-$env:FAMILYCART_JWT_SECRET='replace-with-the-same-secret-of-at-least-32-bytes'
-$env:FAMILYCART_GOOGLE_CLIENT_ID='your-web-client-id.apps.googleusercontent.com'
-```
+   ```text
+   \set ON_ERROR_STOP on
+   BEGIN;
+   \i supabase/migrations/20261125055724_familycart.sql
+   COMMIT;
+   BEGIN;
+   \i supabase/migrations/20261125120000_family_updates.sql
+   COMMIT;
+   \password familycart_identity
+   \password familycart_shopping
+   ```
 
-The checked-in credentials are for localhost development only. Production credentials must be supplied through the hosting provider's secret manager.
+   Choose a different generated password for each login. The migration creates the tables and demo household. FamilyCart seeds store inventory on startup. Existing local users and orders stay in their original database.
+
+   An existing project only needs `20261125120000_family_updates.sql`. It can be pasted into the Supabase SQL Editor between `BEGIN;` and `COMMIT;`. Apply it before starting this version. The previous version keeps working after it.
+
+2. For an IPv4 connection, in the Supabase dashboard choose **Connect → Session pooler**. Copy its host and project reference into the root `.env` using the two service logins below. Percent-encode any reserved URL characters in passwords. These settings belong to the backend.
+
+   ```dotenv
+   FAMILYCART_DB_MODE=supabase
+   FAMILYCART_USER_DATABASE_URL=postgresql://familycart_identity.PROJECT_REF:IDENTITY_PASSWORD@POOLER_HOST:5432/postgres?sslmode=require
+   FAMILYCART_DATABASE_URL=postgresql://familycart_shopping.PROJECT_REF:SHOPPING_PASSWORD@POOLER_HOST:5432/postgres?sslmode=require
+   FAMILYCART_DB_POOL_MIN=1
+   FAMILYCART_DB_POOL_MAX=3
+   ```
+
+   A direct connection uses `db.PROJECT_REF.supabase.co:5432` and the bare service role as the username. Use the session pooler on IPv4-only networks.
+
+3. Start `.\Run-FamilyCart.cmd`. The launcher reads both service URLs from the root `.env`. Each backend checks its database role and schema at startup. Apply future schema changes as administrator migrations and grant the appropriate service role access to new tables or sequences.
+
+### Verify connectivity and import existing data
+
+If Windows reports `[Errno 11001] getaddrinfo failed` for the direct database address, run `.\Run-FamilyCart.cmd --connect-db` from the project folder. Sign in through the Supabase CLI when prompted. The launcher retrieves the assigned session pooler, tests both existing service logins on port 5432, and saves the verified hostname for subsequent launches. It uses npx if the Supabase CLI is unavailable.
+
+If the root `.env` already contains direct Supabase URLs, set `FAMILYCART_SESSION_POOLER_HOST` to the hostname from **Connect → Session pooler** to use IPv4. The launcher adds the project reference to each login and preserves its password and TLS settings. Run `.\Run-FamilyCart.cmd --check-db` to verify both service logins and all 28 tables from your machine.
+
+For a one-time transfer, stop the running FamilyCart launcher and start Docker Desktop. Run `.\Run-FamilyCart.cmd --migrate-local` from the project folder. It starts the existing legacy PostgreSQL containers, holds their tables stable, copies the data in dependency order and compares every source row with the hosted copy. It accepts identical rows on retry and reports conflicts with existing hosted data. A fresh demo seed can be updated to match the source. A successful run prints the verified row counts. Then start FamilyCart normally.
 
 ## Run locally
 
@@ -150,13 +168,13 @@ The Gateway checks every access token's signature, then whether its session is s
 
 | Level | Examples | Checked in |
 |---|---|---|
-| Normal | View, cart items, list items | Gateway memory (5 s), then Redis, then `user-db` |
-| Sensitive | Invitations, cart access, addresses, checkout review, WebSockets, **any unlisted route** | Redis, then `user-db` |
-| Critical | Remove member, transfer ownership, place order, save date of birth | `user-db` |
+| Normal | View, cart items, list items | Gateway memory (5 s), then Redis, then `familycart_identity` |
+| Sensitive | Invitations, cart access, addresses, checkout review, WebSockets, **any unlisted route** | Redis, then `familycart_identity` |
+| Critical | Remove member, transfer ownership, place order, save date of birth | `familycart_identity` |
 
 Routes are classified in `backend/api_gateway/route_policy.py`. Services still check permissions themselves.
 
-Logout commits to `user-db`, writes a "revoked" marker to Redis for 15 minutes and publishes a message.
+Logout commits to `familycart_identity`, writes a "revoked" marker to Redis for 15 minutes and publishes a message.
 Each Gateway then forgets the session and closes its WebSockets. Pub/Sub can miss a Gateway, so its
 5-second memory is the backstop. If Redis could not be told, sensitive routes may accept the session
 for up to `FAMILYCART_SESSION_CACHE_SECONDS` (default 30) and normal routes 5 seconds longer; critical

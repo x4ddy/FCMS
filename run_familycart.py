@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -13,9 +14,11 @@ import webbrowser
 from contextlib import suppress
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parent
+DATABASE_URL_KEYS = ("FAMILYCART_USER_DATABASE_URL", "FAMILYCART_DATABASE_URL")
 FRONTEND = ROOT / "frontend"
 HOST = "127.0.0.1"
 APP_URL = f"http://{HOST}:5173"
@@ -24,11 +27,7 @@ WINDOWS = os.name == "nt"
 HTTP = build_opener(ProxyHandler({}))
 
 
-def load_settings():
-    path = ROOT / ".env"
-    if not path.is_file():
-        raise RuntimeError("Copy .env.example to .env and fill in the settings before launching.")
-
+def read_settings(path):
     settings = {}
     for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = line.strip()
@@ -37,10 +36,23 @@ def load_settings():
         key, separator, value = line.partition("=")
         key, value = key.strip(), value.strip()
         if not separator or not key.isidentifier():
-            raise RuntimeError(f"Expected a KEY=value setting in .env on line {number}.")
+            raise RuntimeError(f"Expected a KEY=value setting in {path.name} on line {number}.")
         if len(value) >= 2 and value[0] in {"'", '"'} and value[-1] == value[0]:
             value = value[1:-1]
         settings[key] = value
+    return settings
+
+
+def load_settings(supabase=False, *, use_saved_pooler=True):
+    path = ROOT / ".env"
+    if not path.is_file():
+        raise RuntimeError("Copy .env.example to .env and fill in the settings before launching.")
+    settings = read_settings(path)
+    # Older installations kept the hosted credentials in a separate file.
+    overlay = ROOT / ".env.supabase"
+    if supabase and overlay.is_file():
+        settings.update(read_settings(overlay))
+    settings["FAMILYCART_DB_MODE"] = "supabase"
 
     required = (
         "FAMILYCART_JWT_SECRET", "FAMILYCART_USER_DATABASE_URL", "FAMILYCART_DATABASE_URL",
@@ -49,11 +61,80 @@ def load_settings():
     missing = [key for key in required if not settings.get(key)]
     if missing:
         raise RuntimeError(f"Missing settings in .env: {', '.join(missing)}.")
+    for key in DATABASE_URL_KEYS:
+        if not settings[key].startswith(("postgresql://", "postgres://")):
+            raise RuntimeError(f"Set {key} to a Supabase PostgreSQL URL.")
+        pooler = settings.get("FAMILYCART_SESSION_POOLER_HOST")
+        direct = re.fullmatch(r"db\.([a-z0-9]+)\.supabase\.co", urlsplit(settings[key]).hostname or "")
+        if not pooler and direct and use_saved_pooler:
+            saved = ROOT / ".familycart" / f"{direct[1]}.pooler"
+            if saved.is_file():
+                pooler = saved.read_text(encoding="ascii").strip()
+        if pooler:
+            settings[key] = session_pooler_url(settings[key], pooler)
     if len(settings["FAMILYCART_JWT_SECRET"].encode("utf-8")) < 32:
         raise RuntimeError("FAMILYCART_JWT_SECRET in .env must be at least 32 bytes.")
     if settings["FAMILYCART_GOOGLE_CLIENT_ID"] != settings["VITE_GOOGLE_CLIENT_ID"]:
         raise RuntimeError("The two Google client IDs in .env must match.")
     return {**os.environ, **settings}
+
+
+def session_pooler_url(url, host):
+    if not re.fullmatch(r"[a-z0-9-]+\.pooler\.supabase\.com", host):
+        raise RuntimeError("FAMILYCART_SESSION_POOLER_HOST must contain only the Supabase pooler hostname.")
+    parts = urlsplit(url)
+    direct = re.fullmatch(r"db\.([a-z0-9]+)\.supabase\.co", parts.hostname or "")
+    if direct:
+        login = f"{parts.username}.{direct[1]}"
+    elif parts.hostname == host and parts.username and "." in parts.username:
+        login = parts.username
+    else:
+        raise RuntimeError("The configured database URL must belong to the direct project host or its session pooler.")
+    return urlunsplit(parts._replace(netloc=f"{login}:{parts.password}@{host}:5432"))
+
+
+def connect_db(supabase):
+    env = load_settings(supabase, use_saved_pooler=False)
+    host = urlsplit(env[DATABASE_URL_KEYS[0]]).hostname or ""
+    project = re.fullmatch(r"db\.([a-z0-9]+)\.supabase\.co", host)
+    python = backend_python()
+    check = [python, "-m", "backend.supabase_cutover", "check"]
+    if not project:
+        # An explicit pooler is already configured.
+        subprocess.run(check, cwd=ROOT, env=env, check=True)
+        return
+    ref = project[1]
+    if any(urlsplit(env[k]).hostname != host for k in DATABASE_URL_KEYS):
+        raise RuntimeError("Both database URLs must point to the same Supabase project.")
+    workdir = ROOT / ".familycart" / "cli"
+    workdir.mkdir(parents=True, exist_ok=True)
+    binary = shutil.which("supabase")
+    if binary:
+        cli = [binary]
+    else:
+        npx = shutil.which("npx.cmd" if WINDOWS else "npx")
+        if not npx:
+            raise RuntimeError("Install Node.js with npx or the Supabase CLI to link the project.")
+        cli = [npx, "--yes", "supabase@2.79.0"]
+    if not os.environ.get("SUPABASE_ACCESS_TOKEN"):
+        print("Authorise the Supabase CLI in your browser to look up this project's IPv4 endpoint.", flush=True)
+        subprocess.run([*cli, "login"], cwd=workdir, check=True)
+    subprocess.run([*cli, "link", "--project-ref", ref], cwd=workdir, check=True)
+    metadata = workdir / "supabase" / ".temp"
+    if not (metadata / "pooler-url").is_file() or not (metadata / "project-ref").is_file():
+        raise RuntimeError("Supabase CLI linked the project but did not return its pooler metadata.")
+    pooled = urlsplit((metadata / "pooler-url").read_text(encoding="utf-8").strip())
+    if ((metadata / "project-ref").read_text().strip() != ref
+            or not (pooled.username or "").endswith("." + ref) or not pooled.hostname):
+        raise RuntimeError("Supabase CLI returned pooler metadata for a different project.")
+    for key in DATABASE_URL_KEYS:
+        env[key] = session_pooler_url(env[key], pooled.hostname)
+    subprocess.run(check, cwd=ROOT, env=env, check=True)
+    saved = ROOT / ".familycart" / f"{ref}.pooler"
+    temporary = saved.with_suffix(".pooler.tmp")
+    temporary.write_text(pooled.hostname + "\n", encoding="ascii")
+    temporary.replace(saved)
+    print(f"Verified both service logins and saved {pooled.hostname} for future launches.")
 
 
 def lock_launcher(handle):
@@ -141,8 +222,8 @@ def start_data_services():
     if engine.stdout.strip() != "linux":
         raise RuntimeError("Switch Docker Desktop to Linux containers mode before launching FamilyCart.")
 
-    print("Waiting for PostgreSQL and Redis...")
-    subprocess.run([docker, "compose", "up", "-d", "--wait", "--wait-timeout", "120"], cwd=ROOT, check=True)
+    print("Starting local Redis for FamilyCart...")
+    subprocess.run([docker, "compose", "up", "-d", "--wait", "--wait-timeout", "120", "redis"], cwd=ROOT, check=True)
 
 
 def check_processes(processes):
@@ -187,12 +268,14 @@ def stop_processes(processes):
             process.wait()
 
 
-def run(no_browser):
-    env = load_settings()
+def run(no_browser, supabase=False):
+    env = load_settings(supabase)
     check_app_ports()
+    python = backend_python()
+    print("Checking both Supabase database logins...", flush=True)
+    subprocess.run([python, "-m", "backend.supabase_cutover", "check"], cwd=ROOT, env=env, check=True)
     frontend = frontend_command()
     start_data_services()
-    python = backend_python()
     processes = {}
 
     def start(name, command, cwd):
@@ -237,13 +320,25 @@ def run(no_browser):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically.")
+    parser.add_argument("--supabase", action="store_true", help="Use the database settings in .env.supabase.")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--connect-db", action="store_true", help="Discover and verify this project's IPv4 session pooler.")
+    actions.add_argument("--check-db", action="store_true", help="Verify both hosted service logins and schema access.")
+    actions.add_argument("--migrate-local", action="store_true", help="Copy and verify legacy PostgreSQL data in Supabase.")
     args = parser.parse_args()
     try:
         state = ROOT / ".familycart"
         state.mkdir(exist_ok=True)
         with (state / "launcher.lock").open("a+b") as lock:
             lock_launcher(lock)
-            run(args.no_browser)
+            if args.connect_db:
+                connect_db(args.supabase)
+            elif args.check_db or args.migrate_local:
+                env = load_settings(args.supabase)
+                action = "migrate" if args.migrate_local else "check"
+                subprocess.run([backend_python(), "-m", "backend.supabase_cutover", action], cwd=ROOT, env=env, check=True)
+            else:
+                run(args.no_browser, args.supabase)
     except KeyboardInterrupt:
         print("FamilyCart stopped.")
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:

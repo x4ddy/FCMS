@@ -54,14 +54,6 @@ def sweep_interval() -> float:
     return max(sync_interval(), float(os.environ.get("FAMILYCART_SYNC_SWEEP_SECONDS", "300")))
 
 
-def latest_revision(db: DatabaseConnection) -> int:
-    if db.dialect == "postgresql":
-        row = db.execute("SELECT last_value, is_called FROM cart_sync_events_id_seq").fetchone()
-        return row["last_value"] if row["is_called"] else 0
-    row = db.execute("SELECT seq FROM sqlite_sequence WHERE name = 'cart_sync_events'").fetchone()
-    return row["seq"] if row else 0
-
-
 def household_revision(db: DatabaseConnection, household_id: str) -> int:
     """The latest cart revision in a household (the numbering checkout quotes are checked against)."""
     return db.execute(

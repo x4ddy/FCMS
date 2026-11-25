@@ -3,7 +3,9 @@ from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from backend.shared.database import DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target
+from backend.shared.database import (
+    DatabaseConnection, DatabaseTarget, connect_database, is_postgres_target, uses_supabase_schema,
+)
 
 SQL_DIR = Path(__file__).parent
 ADDRESS_TABLES = ("user_addresses", "household_addresses")
@@ -23,6 +25,8 @@ def database_target() -> DatabaseTarget:
 
 
 def initialize_database(path: DatabaseTarget) -> None:
+    if uses_supabase_schema(path, "familycart_shopping"):
+        return
     schema_name = "postgres_schema.sql" if is_postgres_target(path) else "schema.sql"
     schema = (SQL_DIR / schema_name).read_text(encoding="utf-8")
     seed = (SQL_DIR / "seed.sql").read_text(encoding="utf-8")

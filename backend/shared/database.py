@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import closing
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -23,6 +24,20 @@ logger = logging.getLogger(__name__)
 
 def is_postgres_target(target: DatabaseTarget) -> bool:
     return isinstance(target, str) and target.startswith(("postgresql://", "postgres://"))
+
+
+def uses_supabase_schema(target: DatabaseTarget, schema: str) -> bool:
+    if os.environ.get("FAMILYCART_DB_MODE", "local") != "supabase":
+        return False
+    if not is_postgres_target(target):
+        raise RuntimeError("Supabase mode requires both PostgreSQL connection URLs.")
+    # The migration owns DDL. Check the service login and its search path before
+    # allowing any unqualified application queries on a shared database.
+    with closing(connect_database(target)) as db:
+        row = db.execute("SELECT current_user AS login, current_schema() AS namespace").fetchone()
+    if row["login"] != schema or row["namespace"] != schema:
+        raise RuntimeError(f"Supabase connection must use the {schema} role and schema.")
+    return True
 
 
 def _postgres_query(query: str) -> str:

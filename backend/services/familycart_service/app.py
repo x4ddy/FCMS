@@ -34,7 +34,7 @@ from backend.services.user_service.db import birth_dates, database_path as user_
 
 from . import checkout
 from .live_sync import (
-    AccessEnded, LiveSync, build_snapshots, household_revision, latest_revision, notify_changed, viewer_role,
+    AccessEnded, LiveSync, build_snapshots, household_revision, notify_changed, viewer_role,
 )
 from .catalogue import Product, load_catalogue
 from .db import (
@@ -1320,7 +1320,7 @@ def adjust_shared_quantity(
             set_contribution(db, household_id, cart_id, sku, caller.user_id, own + body.delta)
             total += body.delta
         elif total == 0:
-            return SharedItemUpdate(sku=sku, quantity=0, revision=latest_revision(db))
+            return SharedItemUpdate(sku=sku, quantity=0, revision=household_revision(db, household_id))
         else:
             # Several fast taps arrive as one request; apply the one-step rule for each.
             # The primary removes their own units first, then other members'; a member
