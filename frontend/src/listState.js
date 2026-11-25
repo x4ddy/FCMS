@@ -91,7 +91,7 @@ export function timeAgo(iso, now = Date.now()) {
 
 /**
  * Apply a list from a live batch to the open list.
- * Batches arrive every ~30 s, so they can be older than what this screen already
+ * Batches arrive every ~20 s, so they can be older than what this screen already
  * knows: skip them while one of our own edits is still being saved (the next batch
  * will include it) or when they are older than the latest change we saw.
  */
@@ -137,4 +137,73 @@ export function chosenForCart(ready, chosenIds, productsBySku) {
   const items = ready.filter((item) => chosenIds.has(item.id) && !item.pending)
   const totalFils = items.reduce((total, item) => total + productsBySku.get(item.sku).price_fils * item.quantity, 0)
   return { items, totalFils }
+}
+
+/* Quick edits to a list wait a moment and are then sent together. `add` entries are
+   { body, temporaryId }: temporaryId is null when the product is already on the list. */
+export function emptyChanges(listId) {
+  return { listId, add: [], set: new Map(), remove: new Set() }
+}
+
+export function hasChanges({ add, set, remove }) {
+  return add.length > 0 || set.size > 0 || remove.size > 0
+}
+
+export function queueAdd(changes, items, body, temporaryId) {
+  if (body.sku) {
+    const waiting = changes.add.find((entry) => entry.body.sku === body.sku)
+    if (waiting) {
+      waiting.body.quantity = Math.min(999, waiting.body.quantity + body.quantity)
+      return
+    }
+    const existing = items.find((item) => item.sku === body.sku && !item.checked && !changes.remove.has(item.id))
+    const queued = existing && changes.set.get(existing.id)
+    if (queued?.quantity != null) {
+      queued.quantity = Math.min(999, queued.quantity + body.quantity)
+      return
+    }
+    changes.add.push({ body: { ...body }, temporaryId: existing ? null : temporaryId })
+    return
+  }
+  changes.add.push({ body: { ...body }, temporaryId })
+}
+
+/** Returns false if the item is still being created on the server and cannot be changed yet. */
+export function queueSet(changes, item, fields) {
+  if (item.pending) {
+    const waiting = changes.add.find((entry) => entry.temporaryId === item.id)
+    if (!waiting || fields.checked !== undefined) return false
+    Object.assign(waiting.body, fields)
+    return true
+  }
+  changes.set.set(item.id, { ...changes.set.get(item.id), ...fields })
+  return true
+}
+
+export function queueRemove(changes, item) {
+  if (item.pending) {
+    const before = changes.add.length
+    changes.add = changes.add.filter((entry) => entry.temporaryId !== item.id)
+    return changes.add.length < before
+  }
+  changes.set.delete(item.id)
+  changes.remove.add(item.id)
+  return true
+}
+
+/** The list as it will be once the waiting changes are saved. */
+export function applyChanges(items, changes, makeTemporary) {
+  const next = items.filter((item) => !changes.remove.has(item.id) && !item.pending)
+  for (const { body, temporaryId } of changes.add) {
+    const index = temporaryId ? -1 : next.findIndex((item) => item.sku === body.sku && !item.checked)
+    if (index >= 0) next[index] = { ...next[index], quantity: Math.min(999, next[index].quantity + body.quantity) }
+    else next.push(makeTemporary(body, temporaryId))
+  }
+  return next.map((item) => changes.set.has(item.id) ? { ...item, ...changes.set.get(item.id) } : item)
+}
+
+export function changesBody({ add, set, remove }) {
+  return {
+    add: add.map(({ body }) => body), set: [...set].map(([id, fields]) => ({ id, ...fields })), remove: [...remove],
+  }
 }

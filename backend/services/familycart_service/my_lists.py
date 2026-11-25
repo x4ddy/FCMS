@@ -17,8 +17,8 @@ from backend.shared.database import DatabaseConnection
 from .app import Caller, apply_account_age, household_access, require_visible_cart, visible_product
 from .db import transaction
 from .lists import (
-    MAX_LIST_QUANTITY, AddItem, AddItems, CreateList, ListDetail, ListItem, ListSummary, MoveResult, MoveToCart,
-    RenameList, UpdateItem, add_rows_to_cart, item_visible, now_iso,
+    MAX_LIST_QUANTITY, AddItem, AddItems, ChangeResult, CreateList, ListChanges, ListDetail, ListItem, ListSummary,
+    MoveResult, MoveToCart, RenameList, SkippedItem, UpdateItem, add_rows_to_cart, item_visible, now_iso,
 )
 
 router = APIRouter()
@@ -194,19 +194,48 @@ def clear_checked(list_id: str, request: Request, caller: Caller) -> ListDetail:
         return detail(db, request, caller, list_id)
 
 
+def apply_update(
+    db: DatabaseConnection, request: Request, list_id: str, item_id: str, body: UpdateItem, caller: Caller, now: str,
+) -> None:
+    require_my_item(db, request, list_id, item_id, caller)
+    if body.quantity is not None:
+        db.execute("UPDATE personal_list_items SET quantity = ? WHERE id = ?", (body.quantity, item_id))
+    if "note" in body.model_fields_set:
+        db.execute("UPDATE personal_list_items SET note = ? WHERE id = ?", (body.note or None, item_id))
+    if body.checked is not None:
+        db.execute("UPDATE personal_list_items SET checked = ? WHERE id = ?", (int(body.checked), item_id))
+    db.execute("UPDATE personal_list_items SET updated_at = ? WHERE id = ?", (now, item_id))
+
+
+@router.post(f"{LIST}/changes")
+def change_items(list_id: str, body: ListChanges, request: Request, caller: Caller) -> ChangeResult:
+    started = datetime.now(timezone.utc)
+    now = (started + timedelta(microseconds=len(body.add))).isoformat()
+    skipped: list[SkippedItem] = []
+    with my_access(request, caller, write=True) as db:
+        require_my_list(db, list_id, caller)
+        for index, item in enumerate(body.add):
+            try:
+                insert(db, request, list_id, item, caller, (started + timedelta(microseconds=index)).isoformat())
+            except HTTPException as error:
+                skipped.append(SkippedItem(id=item.sku or "", reason=str(error.detail)))
+        for item in body.set:
+            try:
+                apply_update(db, request, list_id, item.id, item, caller, now)
+            except HTTPException as error:
+                skipped.append(SkippedItem(id=item.id, reason=str(error.detail)))
+        for item_id in body.remove:
+            db.execute("DELETE FROM personal_list_items WHERE list_id = ? AND id = ?", (list_id, item_id))
+        touch(db, list_id, now)
+        return ChangeResult(list=detail(db, request, caller, list_id), skipped=skipped)
+
+
 @router.patch(f"{LIST}/items/{{item_id}}")
 def update_item(list_id: str, item_id: str, body: UpdateItem, request: Request, caller: Caller) -> ListItem:
     now = now_iso()
     with my_access(request, caller, write=True) as db:
         require_my_list(db, list_id, caller)
-        require_my_item(db, request, list_id, item_id, caller)
-        if body.quantity is not None:
-            db.execute("UPDATE personal_list_items SET quantity = ? WHERE id = ?", (body.quantity, item_id))
-        if "note" in body.model_fields_set:
-            db.execute("UPDATE personal_list_items SET note = ? WHERE id = ?", (body.note or None, item_id))
-        if body.checked is not None:
-            db.execute("UPDATE personal_list_items SET checked = ? WHERE id = ?", (int(body.checked), item_id))
-        db.execute("UPDATE personal_list_items SET updated_at = ? WHERE id = ?", (now, item_id))
+        apply_update(db, request, list_id, item_id, body, caller, now)
         touch(db, list_id, now)
         return to_my_item(require_my_item(db, request, list_id, item_id, caller), caller)
 

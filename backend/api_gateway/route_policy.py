@@ -28,7 +28,7 @@ _NORMAL = {
     ),
     "POST": (
         "maps/resolve", rf"{H}/addresses/{S}/resolve-store",
-        "my-lists", rf"{H}/lists", rf"{LIST}/items", rf"{LIST}/items/(?:bulk|clear-checked)", rf"{LIST}/move-to-cart",
+        "my-lists", rf"{H}/lists", rf"{LIST}/items", rf"{LIST}/items/(?:bulk|clear-checked)", rf"{LIST}/move-to-cart", rf"{LIST}/changes",
     ),
     "PUT": (rf"{CART}/items/{S}/contributions/me",),
     "PATCH": (

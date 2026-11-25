@@ -4,7 +4,7 @@ How it works, in short:
 
 1. A request saves its change in the database as usual. After the transaction
    COMMITS, it drops a tiny "household X changed" note in a Redis set.
-2. Every ``FAMILYCART_SYNC_INTERVAL_SECONDS`` (default 30) one worker:
+2. Every ``FAMILYCART_SYNC_INTERVAL_SECONDS`` (default 20) one worker:
      - takes all notes from Redis (no database work at all if there are none),
      - skips households where nobody has the app open ("who's online" keys),
      - loads the changed carts and lists of the remaining households with a
@@ -47,7 +47,7 @@ LIST_OVERLAP = timedelta(seconds=5)
 
 
 def sync_interval() -> float:
-    return max(1.0, float(os.environ.get("FAMILYCART_SYNC_INTERVAL_SECONDS", "30")))
+    return max(1.0, float(os.environ.get("FAMILYCART_SYNC_INTERVAL_SECONDS", "20")))
 
 
 def sweep_interval() -> float:

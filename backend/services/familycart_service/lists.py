@@ -75,6 +75,21 @@ class UpdateItem(BaseModel):
     checked: bool | None = Field(default=None, strict=True)
 
 
+ItemId = Annotated[str, StringConstraints(min_length=1, max_length=100)]
+
+
+class SetItem(UpdateItem):
+    id: ItemId
+
+
+class ListChanges(BaseModel):
+    """Several quick edits sent as one request. Applied in this order, in one transaction."""
+
+    add: list[AddItem] = Field(default_factory=list, max_length=50)
+    set: list[SetItem] = Field(default_factory=list, max_length=100)
+    remove: list[ItemId] = Field(default_factory=list, max_length=100)
+
+
 class MoveToCart(BaseModel):
     # "personal" moves into the caller's personal cart; anything else is a household cart ID.
     target: Annotated[str, StringConstraints(min_length=1, max_length=100)]
@@ -117,6 +132,11 @@ class ListDetail(ListSummary):
 class SkippedItem(BaseModel):
     id: str
     reason: str
+
+
+class ChangeResult(BaseModel):
+    list: ListDetail
+    skipped: list[SkippedItem]
 
 
 class MoveResult(BaseModel):
@@ -359,6 +379,39 @@ def add_items(
         return list_detail(db, request, household_id, list_id, caller, is_primary)
 
 
+@router.post(f"{LIST}/changes")
+def change_items(
+    household_id: str, list_id: str, body: ListChanges, request: Request, caller: Caller
+) -> ChangeResult:
+    started = datetime.now(timezone.utc)
+    now = (started + timedelta(microseconds=len(body.add))).isoformat()
+    skipped: list[SkippedItem] = []
+    with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        require_list(db, household_id, list_id)
+        for index, item in enumerate(body.add):
+            try:
+                insert_item(db, request, household_id, list_id, item, caller,
+                            (started + timedelta(microseconds=index)).isoformat())
+            except HTTPException as error:
+                skipped.append(SkippedItem(id=item.sku or "", reason=str(error.detail)))
+        for item in body.set:
+            try:
+                apply_item_update(db, request, list_id, item.id, item, caller, now)
+            except HTTPException as error:
+                skipped.append(SkippedItem(id=item.id, reason=str(error.detail)))
+        for item_id in body.remove:
+            try:
+                apply_item_removal(db, request, list_id, item_id, caller, is_primary)
+            except HTTPException as error:
+                # Already gone is what the caller wanted.
+                if error.status_code != 404:
+                    skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
+        touch(db, household_id, list_id, now)
+        return ChangeResult(
+            list=list_detail(db, request, household_id, list_id, caller, is_primary), skipped=skipped,
+        )
+
+
 @router.patch(f"{LIST}/items/{{item_id}}")
 def update_item(
     household_id: str, list_id: str, item_id: str, body: UpdateItem, request: Request, caller: Caller
@@ -366,25 +419,41 @@ def update_item(
     now = now_iso()
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_list(db, household_id, list_id)
-        row = require_item(db, list_id, item_id)
-        if not item_visible(request, caller, row["sku"]):
-            raise HTTPException(status_code=404, detail="Item not found")
-        if body.quantity is not None:
-            db.execute("UPDATE shopping_list_items SET quantity = ? WHERE id = ?", (body.quantity, item_id))
-        if "note" in body.model_fields_set:
-            db.execute("UPDATE shopping_list_items SET note = ? WHERE id = ?", (body.note or None, item_id))
-        if body.checked is not None and body.checked != bool(row["checked"]):
-            db.execute(
-                "UPDATE shopping_list_items SET checked = ?, checked_by = ?, checked_at = ? WHERE id = ?",
-                (
-                    int(body.checked), caller.user_id if body.checked else None,
-                    now if body.checked else None, item_id,
-                ),
-            )
-        db.execute("UPDATE shopping_list_items SET updated_at = ? WHERE id = ?", (now, item_id))
+        apply_item_update(db, request, list_id, item_id, body, caller, now)
         touch(db, household_id, list_id, now)
-        item = to_item(require_item(db, list_id, item_id), caller, is_primary)
-    return item
+        return to_item(require_item(db, list_id, item_id), caller, is_primary)
+
+
+def apply_item_update(
+    db: DatabaseConnection, request: Request, list_id: str, item_id: str, body: UpdateItem, caller: Identity, now: str,
+) -> None:
+    row = require_item(db, list_id, item_id)
+    if not item_visible(request, caller, row["sku"]):
+        raise HTTPException(status_code=404, detail="Item not found")
+    if body.quantity is not None:
+        db.execute("UPDATE shopping_list_items SET quantity = ? WHERE id = ?", (body.quantity, item_id))
+    if "note" in body.model_fields_set:
+        db.execute("UPDATE shopping_list_items SET note = ? WHERE id = ?", (body.note or None, item_id))
+    if body.checked is not None and body.checked != bool(row["checked"]):
+        db.execute(
+            "UPDATE shopping_list_items SET checked = ?, checked_by = ?, checked_at = ? WHERE id = ?",
+            (
+                int(body.checked), caller.user_id if body.checked else None,
+                now if body.checked else None, item_id,
+            ),
+        )
+    db.execute("UPDATE shopping_list_items SET updated_at = ? WHERE id = ?", (now, item_id))
+
+
+def apply_item_removal(
+    db: DatabaseConnection, request: Request, list_id: str, item_id: str, caller: Identity, is_primary: bool,
+) -> None:
+    row = require_item(db, list_id, item_id)
+    if not item_visible(request, caller, row["sku"]):
+        raise HTTPException(status_code=404, detail="Item not found")
+    if not is_primary and row["added_by"] != caller.user_id:
+        raise HTTPException(status_code=403, detail="You can only remove items that you added.")
+    db.execute("DELETE FROM shopping_list_items WHERE id = ?", (item_id,))
 
 
 @router.delete(f"{LIST}/items/{{item_id}}", status_code=204)
@@ -393,12 +462,7 @@ def delete_item(
 ) -> Response:
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         require_list(db, household_id, list_id)
-        row = require_item(db, list_id, item_id)
-        if not item_visible(request, caller, row["sku"]):
-            raise HTTPException(status_code=404, detail="Item not found")
-        if not is_primary and row["added_by"] != caller.user_id:
-            raise HTTPException(status_code=403, detail="You can only remove items that you added.")
-        db.execute("DELETE FROM shopping_list_items WHERE id = ?", (item_id,))
+        apply_item_removal(db, request, list_id, item_id, caller, is_primary)
         touch(db, household_id, list_id, now_iso())
     return Response(status_code=204)
 

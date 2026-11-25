@@ -282,6 +282,32 @@ class MyListTests(FamilyCase):
         contributions = self.call("GET", f"{self.root}/carts/{cart}", self.p)["contributions"]
         self.assertEqual(contributions, [{"sku": "eggs", "contributor_id": "m", "quantity": 2}])
 
+    def test_many_quick_changes_are_one_request_and_one_announcement(self):
+        for base in ("/my-lists", f"{self.root}/lists"):
+            path = f"{base}/{self.call('POST', base, self.m, 201, name='L')['id']}"
+            milk, eggs, bread = self.call("POST", f"{path}/items/bulk", self.m, 201,
+                                          items=[{"sku": "milk"}, {"sku": "eggs"}, {"sku": "bread"}])["items"]
+            self.changed.clear()
+            result = self.call("POST", f"{path}/changes", self.m, add=[{"sku": "milk", "quantity": 2}, {"custom_name": "Tape"}, {"sku": "honey"}],
+                               set=[{"id": eggs["id"], "quantity": 5}, {"id": milk["id"], "checked": True}, {"id": "gone", "quantity": 2}],
+                               remove=[bread["id"], "already-gone"])
+            rows = {row.get("custom_name") or row["sku"]: (row["quantity"], row["checked"]) for row in result["list"]["items"]}
+            self.assertEqual(rows, {"milk": (3, True), "eggs": (5, False), "Tape": (1, False), "honey": (1, False)})
+            self.assertEqual(result["skipped"], [{"id": "gone", "reason": "Item not found"}])
+            self.assertLessEqual(len(self.changed), 1)
+            self.assertEqual(self.call("GET", path, self.m)["items"], result["list"]["items"])
+
+    def test_batched_changes_keep_the_rules(self):
+        path = f"{self.root}/lists/{self.call('POST', self.root + '/lists', self.p, 201, name='L')['id']}"
+        theirs = self.call("POST", f"{path}/items", self.p, 201, sku="milk")["id"]
+        result = self.call("POST", f"{path}/changes", self.c, add=[{"sku": self.adult_sku}, {"sku": "eggs"}], remove=[theirs])
+        self.assertEqual([row["sku"] for row in result["list"]["items"]], ["milk", "eggs"])
+        self.assertEqual({row["reason"] for row in result["skipped"]}, {"Product not found", "You can only remove items that you added."})
+        self.call("POST", f"{path}/changes", self.h("stranger"), 404, remove=[theirs])
+        self.call("POST", f"{path}/changes", self.p, 422, set=[{"id": theirs, "quantity": 0}])
+        mine = f"/my-lists/{self.call('POST', '/my-lists', self.m, 201, name='Mine')['id']}"
+        self.call("POST", f"{mine}/changes", self.p, 404, add=[{"custom_name": "x"}])
+
     def test_sending_needs_membership_and_access(self):
         solo = self.h("solo")
         path = f"/my-lists/{self.call('POST', '/my-lists', solo, 201, name='Solo')['id']}"

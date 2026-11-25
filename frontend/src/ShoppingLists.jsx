@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
 import {
-  avatarHue, cartReadyItems, chosenForCart, groupListItems, initials, itemLabel, mergeListUpdate, parsePastedList, parseQuickAdd,
-  productSuggestions, timeAgo, upsertListSummary,
+  applyChanges, avatarHue, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, initials, mergeListUpdate, parsePastedList, parseQuickAdd,
+  productSuggestions, queueAdd, queueRemove, queueSet, timeAgo, upsertListSummary,
 } from './listState.js'
 
 const money = new Intl.NumberFormat('en-AE', { style: 'currency', currency: 'AED' })
@@ -430,7 +430,7 @@ function ShoppingLists({
   const [detail, setDetail] = useState(null)
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState(false)
-  const [interval, setLiveInterval] = useState(30)
+  const [interval, setLiveInterval] = useState(20)
   const openIdRef = useRef(openId)
   openIdRef.current = openId
   const apiRef = useRef(api)
@@ -438,8 +438,10 @@ function ShoppingLists({
   // Number of our own edits still being saved. Live batches are skipped while
   // this is above zero so an older snapshot cannot undo an edit on screen.
   const inFlight = useRef(0)
-  // Quantity taps per item, sent as one request once the user pauses.
-  const quantityTimers = useRef(new Map())
+  // Quick edits waiting to be sent together, and the send in progress.
+  const queue = useRef(null)
+  const queueTimer = useRef(null)
+  const lastSend = useRef(Promise.resolve(true))
   // Parent callbacks change identity on every render; keep them in refs so
   // the live socket and data loaders are not torn down and rebuilt each time.
   const callbacks = useRef({ onNotify, onAccessLost })
@@ -476,7 +478,7 @@ function ShoppingLists({
   // The overview cards follow the open list locally: no extra request after each edit.
   useEffect(() => { if (detail) setLists((current) => upsertListSummary(current, detail)) }, [detail])
 
-  // Live channel: every ~30 s the server pushes the lists that changed, already
+  // Live channel: every ~20 s the server pushes the lists that changed, already
   // filtered for this viewer. Nothing is fetched per change.
   const liveHouseholdId = mine ? null : household.id
   useEffect(() => {
@@ -548,50 +550,76 @@ function ShoppingLists({
     setDetail((current) => current && { ...current, items: mutate(current.items) })
   }
 
-  function confirmItem(listId, saved, temporaryId) {
-    setDetail((current) => {
-      // The user may have opened another list while this request was running.
-      if (!current || current.id !== listId) return current
-      const items = current.items.filter((item) => item.id !== temporaryId)
-      return {
-        ...current,
-        updated_at: saved.updated_at > current.updated_at ? saved.updated_at : current.updated_at,
-        items: items.some((item) => item.id === saved.id)
-          ? items.map((item) => item.id === saved.id ? saved : item)
-          : [...items, saved],
-      }
-    })
-  }
-
-  function temporaryItem(body, index = 0) {
+  function temporaryItem(body, id) {
     return {
-      id: `pending-${Date.now()}-${index}`, sku: body.sku ?? null, custom_name: body.custom_name ?? null,
-      quantity: body.quantity, note: null, added_by: user.id, added_by_name: user.display_name, checked: false,
+      id, sku: body.sku ?? null, custom_name: body.custom_name ?? null,
+      quantity: body.quantity, note: body.note ?? null, added_by: user.id, added_by_name: user.display_name, checked: false,
       checked_by: null, checked_by_name: null, created_at: new Date().toISOString(), can_delete: true, pending: true,
     }
   }
 
-  async function addItem(body) {
-    const listId = detail.id
-    const existing = body.sku && detail.items.find((item) => item.sku === body.sku && !item.checked)
-    const temporary = existing ? null : temporaryItem(body)
-    if (existing) patchItems((items) => items.map((item) => item.id === existing.id
-      ? { ...item, quantity: Math.min(999, item.quantity + body.quantity) } : item))
-    else patchItems((items) => [...items, temporary])
-    try {
-      confirmItem(listId, await saving(() => api.addListItem(listId, body)), temporary?.id)
-    } catch (error) {
-      fail(error)
-      refreshDetail()
+  /** Add one edit to the waiting batch, show it at once, and send the batch after a short pause. */
+  function queueEdit(edit) {
+    if (!queue.current) {
+      queue.current = emptyChanges(detail.id)
+      inFlight.current += 1  // live updates must not undo an edit that is still waiting
     }
+    const accepted = edit(queue.current)
+    window.clearTimeout(queueTimer.current)
+    queueTimer.current = window.setTimeout(sendQueue, 400)
+    return accepted
+  }
+
+  /** Send every waiting edit as one request, after any request already running. */
+  function sendQueue() {
+    window.clearTimeout(queueTimer.current)
+    const changes = queue.current
+    if (!changes) return lastSend.current
+    queue.current = null
+    const { changeList } = apiRef.current
+    const work = lastSend.current.then(async () => {
+      try {
+        if (!hasChanges(changes)) return true
+        const result = await changeList(changes.listId, changesBody(changes))
+        setDetail((current) => {
+          if (!current || current.id !== changes.listId) return current
+          // Edits made while this request was running are still waiting; keep them on top.
+          const waiting = queue.current?.listId === changes.listId ? queue.current : null
+          return waiting ? { ...result.list, items: applyChanges(result.list.items, waiting, temporaryItem) } : result.list
+        })
+        const reasons = [...new Set(result.skipped.map((skip) => skip.reason))]
+        if (reasons.length > 0) notify(`${result.skipped.length} not saved: ${reasons.join('; ')}`, 'error')
+        return true
+      } catch (error) {
+        fail(error)
+        refreshDetail(changes.listId)
+        return false
+      } finally {
+        inFlight.current -= 1
+      }
+    })
+    lastSend.current = work
+    return work
+  }
+
+  function addItem(body) {
+    const id = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const items = detail.items
+    queueEdit((changes) => queueAdd(changes, items, body, id))
+    patchItems((current) => {
+      const index = body.sku ? current.findIndex((item) => item.sku === body.sku && !item.checked) : -1
+      return index < 0 ? [...current, temporaryItem(body, id)] : current.map((item, at) => at === index
+        ? { ...item, quantity: Math.min(999, item.quantity + body.quantity) } : item)
+    })
   }
 
   async function addMany(rows) {
+    await sendQueue()
     const listId = detail.id
     const bodies = rows.map((row) => row.product
       ? { sku: row.product.sku, quantity: row.quantity }
       : { custom_name: row.text, quantity: row.quantity })
-    const temporaries = bodies.map(temporaryItem)
+    const temporaries = bodies.map((body, index) => temporaryItem(body, `pending-${Date.now()}-${index}`))
     patchItems((items) => [...items, ...temporaries])
     try {
       // One request and one transaction for the whole pasted list.
@@ -604,59 +632,21 @@ function ShoppingLists({
     }
   }
 
-  async function sendItemChange(listId, item, changes) {
-    try {
-      confirmItem(listId, await saving(() => api.updateListItem(listId, item.id, changes)))
-    } catch (error) {
-      fail(error)
-      refreshDetail()
-    }
-  }
-
   function updateItem(item, changes) {
-    if (item.pending) return
+    if (!queueEdit((waiting) => queueSet(waiting, item, changes))) return
     patchItems((items) => items.map((row) => row.id === item.id ? {
       ...row, ...changes,
       ...('checked' in changes ? { checked_by_name: changes.checked ? user.display_name : null } : {}),
     } : row))
-    if ('quantity' in changes && Object.keys(changes).length === 1) {
-      // Fast taps on + / − become one request with the final quantity.
-      const timers = quantityTimers.current
-      const listId = detail.id
-      window.clearTimeout(timers.get(item.id)?.timer)
-      if (!timers.has(item.id)) inFlight.current += 1
-      const send = () => {
-        timers.delete(item.id)
-        inFlight.current -= 1
-        sendItemChange(listId, item, changes)
-      }
-      timers.set(item.id, { timer: window.setTimeout(send, 450), send })
-      return
-    }
-    sendItemChange(detail.id, item, changes)
   }
 
-  // Leaving the list sends any quantity change that is still waiting, straight away.
-  useEffect(() => () => {
-    for (const { timer, send } of [...quantityTimers.current.values()]) {
-      window.clearTimeout(timer)
-      send()
-    }
-  }, [openId])
-
-  async function deleteItem(item) {
-    if (item.pending) return
-    const label = itemLabel(item, productsBySku)
-    const listId = detail.id
+  function deleteItem(item) {
+    if (!queueEdit((waiting) => queueRemove(waiting, item))) return
     patchItems((items) => items.filter((row) => row.id !== item.id))
-    try {
-      await saving(() => api.deleteListItem(listId, item.id))
-      notify(`Removed ${label}.`)
-    } catch (error) {
-      fail(error)
-      refreshDetail()
-    }
   }
+
+  // Leaving the list sends anything that is still waiting, straight away.
+  useEffect(() => () => { sendQueue() }, [openId])
 
   const back = openId ? () => { setOpenId(null); setDetail(null) } : onBack
   const liveTitle = live
@@ -688,8 +678,11 @@ function ShoppingLists({
       ) : (
         <ListDetail key={detail.id} mine={mine} list={detail} products={products} productsBySku={productsBySku} categoryOrder={categoryOrder}
           carts={carts} defaultCartId={defaultCartId} busy={busy} onBack={back}
-          onRename={(name) => run(async () => setDetail(await saving(() => api.renameList(detail.id, name))))}
+          onRename={(name) => run(async () => {
+            if (await sendQueue()) setDetail(await saving(() => api.renameList(detail.id, name)))
+          })}
           onDelete={() => run(async () => {
+            await sendQueue()
             await saving(() => api.deleteList(detail.id))
             setLists((current) => upsertListSummary(current, { id: detail.id, deleted: true }))
             notify(`Deleted ${detail.name}.`)
@@ -700,8 +693,12 @@ function ShoppingLists({
           onAddMany={addMany}
           onUpdateItem={updateItem}
           onDeleteItem={deleteItem}
-          onClearDone={() => run(async () => setDetail(await saving(() => api.clearCheckedItems(detail.id))))}
+          onClearDone={() => run(async () => {
+            if (await sendQueue()) setDetail(await saving(() => api.clearCheckedItems(detail.id)))
+          })}
           onMove={(cartId, itemIds) => run(async () => {
+            // Save waiting quantities first, so the cart gets what is on screen.
+            if (!await sendQueue()) return
             const result = await saving(() => api.moveListToCart(detail.id, cartId, itemIds, mine ? household.id : null))
             const cartName = carts.find((cart) => cart.id === cartId)?.name ?? 'the cart'
             if (result.moved.length > 0) {

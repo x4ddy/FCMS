@@ -141,6 +141,7 @@ function listApi(token, lists) {
     deleteList: (id) => request(listPath(id), { token, method: 'DELETE' }),
     addListItem: (id, item) => request(`${listPath(id)}/items`, { token, method: 'POST', body: item }),
     addListItems: (id, items) => request(`${listPath(id)}/items/bulk`, { token, method: 'POST', body: { items } }),
+    changeList: (id, changes) => request(`${listPath(id)}/changes`, { token, method: 'POST', body: changes }),
     updateListItem: (id, itemId, changes) => request(`${listPath(id)}/items/${encodeURIComponent(itemId)}`, {
       token, method: 'PATCH', body: changes,
     }),

@@ -128,7 +128,7 @@ For the simulated payment-decline control during a manual run, set `FAMILYCART_D
 Changes are saved immediately, but other members' screens are updated in batches:
 
 1. After a change **commits**, the service drops a "household changed" note in Redis.
-2. Every `FAMILYCART_SYNC_INTERVAL_SECONDS` (default 30) one worker collects the notes,
+2. Every `FAMILYCART_SYNC_INTERVAL_SECONDS` (default 20) one worker collects the notes,
    skips households where nobody has the app open, loads the changed carts and lists
    with a few bulk queries, and publishes **one snapshot per household**.
 3. Each open WebSocket filters that snapshot for its viewer **in memory** and pushes it.
@@ -194,6 +194,7 @@ routes refuse it at once. With Redis down the database decides; with both down t
 | Read, rename, or delete a list | `GET/PATCH/DELETE /api/v1/households/{household_id}/lists/{list_id}` |
 | Add, edit, tick, or remove list items | `POST .../lists/{list_id}/items`, `PATCH/DELETE .../items/{item_id}` |
 | Add many list items at once | `POST .../lists/{list_id}/items/bulk` |
+| Several list changes at once (add, set, remove) | `POST .../lists/{list_id}/changes`, `POST /api/v1/my-lists/{list_id}/changes` |
 | Clear ticked items | `POST .../lists/{list_id}/items/clear-checked` |
 | Send list items to a cart | `POST .../lists/{list_id}/move-to-cart` |
 | Live list changes (WebSocket) | `/api/v1/households/{household_id}/lists/live` |

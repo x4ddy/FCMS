@@ -110,3 +110,26 @@ test('only chosen items that can still be bought are sent to a cart', async () =
   assert.deepEqual(send('a', 'c', 'gone').items.map((row) => row.id), ['a'])
   assert.equal(send('a').totalFils, 1500)
 })
+
+test('quick list changes are combined into one batch', async () => {
+  const { applyChanges, changesBody, emptyChanges, hasChanges, queueAdd, queueRemove, queueSet } = await import('../src/listState.js')
+  const items = [item('m', { sku: 'milk', quantity: 1 }), item('e', { sku: 'eggs', quantity: 1 }), item('a', { sku: 'apples' })]
+  const waiting = emptyChanges('l')
+  assert.equal(hasChanges(waiting), false)
+  for (const quantity of [2, 3, 4]) queueSet(waiting, items[0], { quantity })
+  queueAdd(waiting, items, { sku: 'milk', quantity: 2 }, 't0')        // on top of the waiting quantity
+  queueAdd(waiting, items, { sku: 'eggs', quantity: 1 }, 't1')        // already on the list
+  queueAdd(waiting, items, { sku: 'eggs', quantity: 1 }, 't2')
+  queueAdd(waiting, items, { custom_name: 'Tape', quantity: 1 }, 't3')
+  queueAdd(waiting, items, { custom_name: 'Glue', quantity: 1 }, 't4')
+  queueSet(waiting, { id: 't3', pending: true }, { quantity: 6 })     // not saved yet
+  assert.equal(queueRemove(waiting, { id: 't4', pending: true }), true)
+  queueSet(waiting, items[2], { quantity: 9 })
+  queueRemove(waiting, items[2])
+  assert.equal(queueSet(waiting, { id: 'being-created', pending: true }, { quantity: 2 }), false)
+  assert.deepEqual(changesBody(waiting), {
+    add: [{ sku: 'eggs', quantity: 2 }, { custom_name: 'Tape', quantity: 6 }], set: [{ id: 'm', quantity: 6 }], remove: ['a'],
+  })
+  const shown = applyChanges(items, waiting, (body, id) => ({ id, ...body }))
+  assert.deepEqual(shown.map((row) => [row.id, row.quantity]), [['m', 6], ['e', 3], ['t3', 6]])
+})
