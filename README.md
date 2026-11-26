@@ -82,6 +82,12 @@ The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_ide
    BEGIN;
    \i supabase/migrations/20261125150000_checkout_and_roles.sql
    COMMIT;
+   BEGIN;
+   \i supabase/migrations/20261126090000_cart_operations.sql
+   COMMIT;
+   BEGIN;
+   \i supabase/migrations/20261126120000_merge_tables.sql
+   COMMIT;
    \password familycart_identity
    \password familycart_shopping
    ```

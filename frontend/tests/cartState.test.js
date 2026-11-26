@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { applyAdjustment, cartQuantities, cartRows, withTaps } from '../src/cartState.js'
+import { cartQuantities, cartRows, withOperations, withTaps } from '../src/cartState.js'
 
 const row = (sku, contributor_id, quantity) => ({ sku, contributor_id, quantity })
 
@@ -11,15 +11,10 @@ test('quantities add up across members and unsaved taps go on top', () => {
   assert.deepEqual(totals, { milk: 3, eggs: 1 })
 })
 
-test('adding goes to your own line', () => {
-  assert.deepEqual(applyAdjustment([row('milk', 'b', 1)], 'milk', 2, 'a'), [row('milk', 'b', 1), row('milk', 'a', 2)])
-  assert.deepEqual(applyAdjustment([row('milk', 'a', 1)], 'milk', 2, 'a'), [row('milk', 'a', 3)])
-})
-
-test('removing takes your own units first and then other members in order', () => {
-  const before = [row('milk', 'c', 2), row('milk', 'b', 1), row('milk', 'z', 1), row('eggs', 'b', 4)]
-  assert.deepEqual(applyAdjustment(before, 'milk', -3, 'z'), [row('milk', 'c', 1), row('eggs', 'b', 4)])
-  assert.equal(before[0].quantity, 2)
+test('unconfirmed changes go on top in the order they were made', () => {
+  const change = (delta, sku = 'milk') => ({ kind: 'adjust', sku, delta })
+  assert.deepEqual(withOperations({ milk: 2 }, [change(3), { kind: 'remove', sku: 'milk' }, change(1), change(1, 'eggs')]), { milk: 1, eggs: 1 })
+  assert.deepEqual(withOperations({ milk: 1 }, [change(-3), change(2)]), { milk: 2 })
 })
 
 test('cart rows follow the catalogue, hide empty ones and keep products that are no longer listed', () => {
@@ -29,4 +24,9 @@ test('cart rows follow the catalogue, hide empty ones and keep products that are
   assert.deepEqual(rows.map((item) => item.sku), ['eggs', 'milk', 'gone'])
   assert.equal(rows[2].product, null)
   assert.deepEqual(rows[1].people, [row('milk', 'a', 1)])
+})
+
+test('an unresolved product stays listed at 0', () => {
+  const rows = cartRows([], { milk: 0 }, [{ sku: 'eggs' }, { sku: 'milk' }], new Set(['milk']))
+  assert.deepEqual(rows.map((item) => [item.sku, item.quantity]), [['milk', 0]])
 })

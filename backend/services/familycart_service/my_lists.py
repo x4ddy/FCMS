@@ -17,6 +17,7 @@ from backend.shared.database import DatabaseConnection
 from . import checkout_session
 from .app import Caller, apply_account_age, household_access, require_visible_cart, visible_product
 from .db import transaction
+from .operations import Operation, OperationKey
 from .lists import (
     MAX_LIST_QUANTITY, AddItem, AddItems, ChangeResult, CreateList, ListChanges, ListDetail, ListItem, ListSummary,
     MoveResult, MoveToCart, RenameList, SkippedItem, UpdateItem, add_rows_to_cart, item_visible, now_iso,
@@ -252,9 +253,16 @@ def delete_item(list_id: str, item_id: str, request: Request, caller: Caller) ->
 
 
 @router.post(f"{LIST}/move-to-cart")
-def move_to_cart(list_id: str, body: MoveMyItems, request: Request, caller: Caller) -> MoveResult:
+def move_to_cart(
+    list_id: str, body: MoveMyItems, request: Request, caller: Caller, key: OperationKey = None,
+) -> MoveResult:
     now = now_iso()
     with household_access(request, body.household_id, caller, write=True) as (db, is_primary):
+        operation = Operation(
+            db, body.household_id, caller.user_id, key, ("move-mine", body.household_id, list_id, body.model_dump()),
+        )
+        if operation.previous:
+            return MoveResult(**operation.previous)
         require_my_list(db, list_id, caller)
         cart = require_visible_cart(
             db, body.household_id, checkout_session.open_cart_id(db, body.target), caller, is_primary,
@@ -267,4 +275,4 @@ def move_to_cart(list_id: str, body: MoveMyItems, request: Request, caller: Call
             db.execute("UPDATE personal_list_items SET checked = 1, updated_at = ? WHERE id = ?", (now, item_id))
         if result.moved:
             touch(db, list_id, now)
-        return result
+        return operation.save(result)

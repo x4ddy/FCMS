@@ -122,7 +122,6 @@ class AgeApprovalTests(FamilyCase):
 
     def test_a_waiting_member_is_not_an_adult_outside_the_household_either(self):
         self.call("GET", f"/products/{self.adult_sku}", self.m, 404)
-        self.call("PATCH", f"/personal-cart/items/{self.adult_sku}", self.m, 404, delta=1)
         self.call("GET", f"/products/{self.adult_sku}", self.h("no-household"))
 
     def test_joining_again_cannot_clear_a_decision(self):
@@ -156,7 +155,9 @@ class AgeApprovalTests(FamilyCase):
     def test_waiting_member_cannot_check_out_or_order(self):
         tokens = create_session(self.users, self.secret, Identity("m", True), "Morgan", date_of_birth="2000-01-01", google_subject="m")
         headers = {"Authorization": f"Bearer {tokens.access_token}"}
-        body = {"cart": {"kind": "personal"}, "default_address": {"kind": "personal", "address_id": "x"}}
+        household = self.root.split("/")[-1]
+        body = {"cart": {"kind": "household", "household_id": household, "cart_id": "x"},
+                "default_address": {"kind": "household", "address_id": "x"}}
         response = self.client.post(f"{API}/checkout/quotes", headers=headers, json=body)
         self.assertEqual((response.status_code, response.json()["detail"]["code"]), (403, "AGE_ELIGIBILITY_REQUIRED"))
 
@@ -165,15 +166,17 @@ class AgeApprovalTests(FamilyCase):
             path = Path(folder) / "old.sqlite3"
             initialize_database(path)
             with closing(sqlite3.connect(path)) as raw:
-                raw.execute("CREATE TABLE keep AS SELECT household_id, user_id, display_name, is_adult FROM household_member_profiles")
-                raw.execute("DROP TABLE household_member_profiles")
-                raw.execute("ALTER TABLE keep RENAME TO household_member_profiles")
-                raw.execute("CREATE UNIQUE INDEX k ON household_member_profiles (household_id, user_id)")
+                # The layout from before age checks: details in their own table, without age_status.
+                raw.execute("""CREATE TABLE household_member_profiles AS
+                               SELECT household_id, user_id, display_name, is_adult FROM household_members""")
+                raw.execute("ALTER TABLE household_members DROP COLUMN age_status")
                 raw.commit()
             initialize_database(path)
             initialize_database(path)
             with transaction(path) as db:
-                self.assertEqual({row["age_status"] for row in db.execute("SELECT age_status FROM household_member_profiles")}, {"APPROVED"})
+                self.assertEqual({row["age_status"] for row in db.execute("SELECT age_status FROM household_members")}, {"APPROVED"})
+                self.assertIsNone(db.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'household_member_profiles'").fetchone())
 
 
 class FamilyAddressTests(FamilyCase):

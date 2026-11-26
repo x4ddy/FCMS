@@ -8,7 +8,7 @@ from backend.shared.database import (
 )
 
 SQL_DIR = Path(__file__).parent
-ADDRESS_TABLES = ("user_addresses", "household_addresses")
+ADDRESS_TABLES = ("household_addresses",)
 ADDRESS_FIELDS = "id, label, recipient_name, address_line1, address_line2, city, postal_code, phone, latitude, longitude"
 
 # A household address belongs to the member who added it, and only counts while they are a member.
@@ -33,34 +33,108 @@ def initialize_database(path: DatabaseTarget) -> None:
     checkout_schema = (SQL_DIR / "checkout_schema.sql").read_text(encoding="utf-8")
     with closing(connect_database(path)) as db:
         if db.dialect == "sqlite":
-            db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{seed}\n{checkout_schema}")
+            db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{checkout_schema}")
             with db:
-                add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT", "reason": "TEXT"})
+                add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT", "reason": "TEXT", "request_id": "TEXT"})
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
-                # People who were members before age approval existed keep the access they had.
-                add_sqlite_columns(db, "deleted_carts", {"next_cart_id": "TEXT"})
-                add_sqlite_columns(db, "household_member_profiles", {"age_status": "TEXT NOT NULL DEFAULT 'APPROVED'"})
+                merge_tables(db)
+                db.execute_script(seed)
         else:
             db.execute("BEGIN")
             try:
                 db.execute_script(schema)
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS actor_id TEXT")
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS reason TEXT")
+                db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS request_id TEXT")
                 for table in ADDRESS_TABLES:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
                         ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION""")
-                db.execute("ALTER TABLE deleted_carts ADD COLUMN IF NOT EXISTS next_cart_id TEXT")
-                db.execute("""ALTER TABLE household_member_profiles
-                    ADD COLUMN IF NOT EXISTS age_status TEXT NOT NULL DEFAULT 'APPROVED'""")
-                db.execute_script(seed)
                 db.execute_script(checkout_schema)
+                merge_tables(db)
+                db.execute_script(seed)
             except Exception:
                 db.rollback()
                 raise
             else:
                 db.commit()
+
+
+# Columns that replaced eight tables, as (table, column, definition).
+MERGED_COLUMNS = (
+    ("households", "name", "TEXT"),
+    ("households", "admin_id", "TEXT"),
+    ("households", "created_at", "TEXT"),
+    ("household_members", "display_name", "TEXT"),
+    ("household_members", "is_adult", "SMALLINT NOT NULL DEFAULT 0"),
+    ("household_members", "age_status", "TEXT NOT NULL DEFAULT 'APPROVED'"),
+    ("carts", "deleted", "SMALLINT NOT NULL DEFAULT 0"),
+    ("carts", "next_cart_id", "TEXT"),
+    ("carts", "creator_revoked", "SMALLINT NOT NULL DEFAULT 0"),
+    ("carts", "revision", "BIGINT NOT NULL DEFAULT 0"),
+    ("carts", "live_revision", "BIGINT NOT NULL DEFAULT 0"),
+)
+RETIRED_TABLES = (
+    "household_member_profiles", "household_profiles", "deleted_carts", "cart_creator_revocations",
+    "checkout_cart_revisions", "user_addresses", "personal_cart_items", "personal_carts",
+)
+
+
+def merge_tables(db: DatabaseConnection) -> None:
+    """Bring a database from before the merge up to date. Does nothing on a new or already merged one.
+
+    The hosted database gets the same change from supabase/migrations/20261126120000_merge_tables.sql.
+    """
+    if db.dialect == "sqlite":
+        tables = {row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        columns = lambda table: {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+    else:
+        tables = {row["tablename"] for row in db.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+        columns = lambda table: {row["column_name"] for row in db.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema = current_schema() AND table_name = ?""", (table,))}
+    for table, column, definition in MERGED_COLUMNS:
+        if column not in columns(table):
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    if "household_profiles" in tables:
+        db.execute("""UPDATE households SET
+            name = (SELECT name FROM household_profiles WHERE household_id = households.id),
+            admin_id = (SELECT created_by FROM household_profiles WHERE household_id = households.id),
+            created_at = (SELECT created_at FROM household_profiles WHERE household_id = households.id)""")
+    if "household_member_profiles" in tables:
+        profile = "FROM household_member_profiles AS p WHERE p.household_id = household_members.household_id " \
+                  "AND p.user_id = household_members.user_id"
+        # Before age checks existed this column was missing, and everybody kept their access.
+        status = "p.age_status" if "age_status" in columns("household_member_profiles") else "NULL"
+        db.execute(f"""UPDATE household_members SET
+            display_name = (SELECT p.display_name {profile}),
+            is_adult = COALESCE((SELECT p.is_adult {profile}), 0),
+            age_status = COALESCE((SELECT {status} {profile}), 'APPROVED')""")
+    if "deleted_carts" in tables:
+        db.execute("""UPDATE carts SET deleted = 1,
+            next_cart_id = (SELECT next_cart_id FROM deleted_carts WHERE cart_id = carts.id)
+            WHERE id IN (SELECT cart_id FROM deleted_carts)""")
+    if "cart_creator_revocations" in tables:
+        db.execute("UPDATE carts SET creator_revoked = 1 WHERE id IN (SELECT cart_id FROM cart_creator_revocations)")
+    if "checkout_cart_revisions" in tables:
+        revision = "FROM checkout_cart_revisions AS r WHERE r.kind = 'household' AND r.cart_id = carts.id"
+        live = "live_revision" if "live_revision" in columns("checkout_cart_revisions") else "0"
+        db.execute(f"""UPDATE carts SET
+            revision = COALESCE((SELECT r.revision {revision}), 0),
+            live_revision = COALESCE((SELECT r.{live} {revision}), 0)""")
+    if "role" in columns("household_members"):
+        db.execute("""UPDATE households SET admin_id = (SELECT user_id FROM household_members
+                      WHERE household_id = households.id AND role = 'primary' LIMIT 1) WHERE admin_id IS NULL""")
+        db.execute("ALTER TABLE household_members DROP COLUMN role")
+    # Anything without the old details still gets usable values.
+    db.execute("UPDATE households SET name = 'My Household' WHERE name IS NULL")
+    db.execute("UPDATE households SET created_at = '2026-01-01T00:00:00+00:00' WHERE created_at IS NULL")
+    db.execute("UPDATE household_members SET display_name = user_id WHERE display_name IS NULL")
+    for table in RETIRED_TABLES:
+        if table in tables:
+            db.execute(f"DROP TABLE {table}")
 
 
 def add_sqlite_columns(db: DatabaseConnection, table: str, definitions: dict[str, str]) -> None:
@@ -71,7 +145,8 @@ def add_sqlite_columns(db: DatabaseConnection, table: str, definitions: dict[str
 
 
 @contextmanager
-def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[DatabaseConnection]:
+def transaction(path: DatabaseTarget, *, write: bool = False, snapshot: bool = False) -> Iterator[DatabaseConnection]:
+    """``snapshot`` makes every query see the database at one moment, so contents and revision belong together."""
     with closing(connect_database(path)) as db:
         # Writers reserve the write lock before reading membership or grants.
         if db.dialect == "sqlite":
@@ -79,6 +154,8 @@ def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[Databa
         # psycopg opens the PostgreSQL transaction itself on the first statement,
         # so an explicit BEGIN would only cost an extra round trip.
         try:
+            if snapshot and db.dialect == "postgresql":
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             yield db
         except Exception:
             db.rollback()
@@ -90,14 +167,12 @@ def transaction(path: DatabaseTarget, *, write: bool = False) -> Iterator[Databa
 def active_member(
     db: DatabaseConnection, household_id: str, user_id: str, *, lock: bool = False
 ):
-    row_lock = "FOR SHARE OF members, profiles" if lock and db.dialect == "postgresql" else ""
+    row_lock = "FOR SHARE OF members, household" if lock and db.dialect == "postgresql" else ""
     return db.execute(
         f"""
-        SELECT members.role, profiles.created_by AS owner_id, person.age_status
+        SELECT household.admin_id AS owner_id, members.age_status
         FROM household_members AS members
-        JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
-        LEFT JOIN household_member_profiles AS person
-          ON person.household_id = members.household_id AND person.user_id = members.user_id
+        JOIN households AS household ON household.id = members.household_id
         WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
         {row_lock}
         """,
@@ -108,30 +183,23 @@ def active_member(
 def lock_household(db: DatabaseConnection, household_id: str) -> None:
     # Every household writer takes this lock before reading roles or changing carts.
     if db.dialect == "postgresql":
-        db.execute("SELECT id FROM households WHERE id = ? FOR NO KEY UPDATE", (household_id,)).fetchone()
-
-
-def personal_cart(db: DatabaseConnection, user_id: str, *, lock: bool = False):
-    row_lock = " FOR NO KEY UPDATE" if lock and db.dialect == "postgresql" else ""
-    return db.execute(
-        "SELECT id FROM personal_carts WHERE user_id = ?" + row_lock, (user_id,)
-    ).fetchone()
-
-
-def increment_personal_revision(db: DatabaseConnection, cart_id: str, updated_at: str) -> None:
-    db.execute("UPDATE personal_carts SET updated_at = ? WHERE id = ?", (updated_at, cart_id))
-    db.execute(
-        """INSERT INTO checkout_cart_revisions (kind, cart_id, revision) VALUES ('personal', ?, 1)
-           ON CONFLICT (kind, cart_id) DO UPDATE SET revision = checkout_cart_revisions.revision + 1""", (cart_id,),
-    )
+        # The same query limits how long this transaction waits, so work a browser has
+        # stopped waiting for (5 seconds) does not keep holding connections.
+        db.execute(
+            """SELECT households.id, limits.* FROM households, (
+                   SELECT set_config('lock_timeout', '3500ms', true), set_config('statement_timeout', '4500ms', true)
+                   OFFSET 0
+               ) AS limits(lock_wait, statement_limit)
+               WHERE households.id = ? FOR NO KEY UPDATE OF households""", (household_id,),
+        ).fetchone()
 
 
 def household_member(db: DatabaseConnection, household_id: str, user_id: str):
     return db.execute(
         """
-        SELECT members.role, members.active, profiles.created_by AS owner_id
+        SELECT members.active, household.admin_id AS owner_id
         FROM household_members AS members
-        JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
+        JOIN households AS household ON household.id = members.household_id
         WHERE members.household_id = ? AND members.user_id = ?
         """,
         (household_id, user_id),
@@ -143,13 +211,11 @@ def load_carts(
 ):
     query = """
         SELECT carts.id, carts.name, carts.creator_id, carts.adults_only,
-               cart_creator_revocations.cart_id IS NOT NULL AS creator_revoked,
+               carts.creator_revoked,
                cart_grants.member_id IS NOT NULL AS has_grant
         FROM carts
         LEFT JOIN cart_grants ON cart_grants.cart_id = carts.id AND cart_grants.member_id = ?
-        LEFT JOIN cart_creator_revocations ON cart_creator_revocations.cart_id = carts.id
-        WHERE carts.household_id = ?
-            AND NOT EXISTS (SELECT 1 FROM deleted_carts WHERE deleted_carts.cart_id = carts.id)
+        WHERE carts.household_id = ? AND carts.deleted = 0
     """
     parameters = [user_id, household_id]
     if cart_id is not None:
@@ -159,11 +225,10 @@ def load_carts(
 
 
 def delete_cart(db: DatabaseConnection, cart_id: str) -> None:
-    # Keep the cart ID for pending sync events and prevent reseeding deleted demo carts.
-    db.execute("INSERT INTO deleted_carts (cart_id) VALUES (?)", (cart_id,))
+    # Keep the cart row for pending sync events and old records, and so demo carts are not seeded again.
+    db.execute("UPDATE carts SET deleted = 1, creator_revoked = 0 WHERE id = ?", (cart_id,))
     db.execute("DELETE FROM cart_item_contributions WHERE cart_id = ?", (cart_id,))
     db.execute("DELETE FROM cart_grants WHERE cart_id = ?", (cart_id,))
-    db.execute("DELETE FROM cart_creator_revocations WHERE cart_id = ?", (cart_id,))
 
 
 def contribution_quantity(db: DatabaseConnection, cart_id: str, sku: str, contributor_id: str) -> int:
@@ -222,8 +287,8 @@ ITEM_COLUMNS = """
     checker.display_name AS checked_by_name
 """
 ITEM_JOINS = """
-    LEFT JOIN household_member_profiles AS adder
+    LEFT JOIN household_members AS adder
       ON adder.household_id = items.household_id AND adder.user_id = items.added_by
-    LEFT JOIN household_member_profiles AS checker
+    LEFT JOIN household_members AS checker
       ON checker.household_id = items.household_id AND checker.user_id = items.checked_by
 """

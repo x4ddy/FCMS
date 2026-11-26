@@ -186,6 +186,9 @@ button.product-open:active:not(:disabled) { transform: none; }
 .add-button:hover:not(:disabled) { background: #3a2a52; }
 .card-note { padding: 4px 8px; border-radius: 7px; background: #231b30; color: #d7baff; font-size: .76rem; font-weight: 600; }
 .stepper { display: inline-flex; align-items: center; border: 1px solid #c19aff; border-radius: 9px; background: #231b30; color: #fff; animation: pop .18s var(--ease); }
+.stepper-quantity { position: relative; display: inline-grid; place-items: center; }
+/* Overlaps the empty edge of the + button, so nothing moves under the finger. */
+.stepper-spinner { position: absolute; left: calc(100% - 1px); top: 50%; width: 9px; height: 9px; margin-top: -4.5px; border: 1.5px solid rgba(217, 192, 255, .3); border-top-color: #d9c0ff; border-radius: 50%; pointer-events: none; animation: spin .8s linear infinite; }
 .stepper button { width: 36px; min-height: 36px; padding: 0; border: 0; background: none; color: #d9c0ff; }
 .stepper button:hover:not(:disabled) { background: #3a2a52; }
 .stepper button:disabled { opacity: .35; }
@@ -472,6 +475,7 @@ button.note-button:hover:not(:disabled) { background: none; text-decoration: und
 @keyframes fade { from { opacity: 0; } }
 @keyframes slide-in { from { transform: translateX(60px); opacity: 0; } }
 @keyframes pop { from { transform: scale(.85); } 60% { transform: scale(1.06); } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes shimmer { to { transform: translateX(100%); } }
 
 @media (max-width: 900px) {

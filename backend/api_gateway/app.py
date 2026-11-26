@@ -71,8 +71,6 @@ def _target_for(path: str, app: FastAPI) -> str:
         path == "households"
         or path.startswith("households/")
         or path.startswith("household-invitations/")
-        or path == "personal-cart"
-        or path.startswith("personal-cart/")
         or path == "my-lists"
         or path.startswith("my-lists/")
         or path == "products"

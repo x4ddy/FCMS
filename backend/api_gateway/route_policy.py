@@ -23,7 +23,7 @@ LIST = rf"(?:{H}/lists|my-lists)/{S}"
 
 _NORMAL = {
     "GET": (
-        "my-lists", "products", rf"products/{S}", "households", "personal-cart", "orders", rf"orders/{S}",
+        "my-lists", "products", rf"products/{S}", "households", "orders", rf"orders/{S}",
         "maps/stores", rf"{H}/(?:carts|capabilities|members|addresses|lists)", CART, rf"{CART}/grants", LIST,
     ),
     "POST": (
@@ -32,7 +32,7 @@ _NORMAL = {
     ),
     "PUT": (rf"{CART}/items/{S}/contributions/me",),
     "PATCH": (
-        rf"personal-cart/items/{S}", rf"{CART}/items/{S}", rf"{CART}/items/{S}/contributions/me",
+        rf"{CART}/items/{S}", rf"{CART}/items/{S}/contributions/me",
         LIST, rf"{LIST}/items/{S}",
     ),
     "DELETE": (rf"{CART}/items/{S}", rf"{CART}/items/{S}/contributions/{S}", rf"{LIST}/items/{S}"),

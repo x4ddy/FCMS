@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import secrets
 from collections.abc import AsyncIterator, Iterator
@@ -19,10 +20,11 @@ from jwt import InvalidTokenError
 from pydantic import BaseModel, Field, StringConstraints, ValidationError, model_validator
 from redis.exceptions import RedisError
 from starlette.requests import HTTPConnection
+from starlette.responses import JSONResponse
 
 from backend.shared.api import API_PREFIX
 from backend.shared.cache import cache_redis_url, live_redis_url
-from backend.shared.database import DatabaseConnection, database_error_types
+from backend.shared.database import DatabaseConnection, database_error_types, database_unavailable_types
 from backend.shared.demo_members import MEMBERS_BY_ID
 from backend.shared.maps import (
     Coordinates, CoverageResult, Latitude, Longitude, MAPS_UNAVAILABLE, address_validation_error,
@@ -33,19 +35,20 @@ from backend.services.refresh_service.service import session_profile
 from backend.services.user_service.db import birth_dates, database_path as user_database_path
 
 from . import checkout, checkout_session
+from .operations import Operation, OperationKey, applied_keys, event_key
 from .live_sync import (
     HOUSEHOLD_DELETED, AccessEnded, LiveSync, build_snapshots, household_revision, notify_changed, viewer_role,
 )
 from .catalogue import Product, load_catalogue
 from .db import (
-    ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart, increment_personal_revision,
+    ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart,
     initialize_database, load_carts,
-    household_member, load_contributions, lock_household, personal_cart, set_contribution, transaction,
+    household_member, load_contributions, lock_household, set_contribution, transaction,
 )
 
+logger = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
 HOUSEHOLD = f"{API_PREFIX}/households/{{household_id}}"
-USER_ADDRESS = f"{API_PREFIX}/addresses/{{address_id}}"
 HOUSEHOLD_ADDRESS = f"{HOUSEHOLD}/addresses/{{address_id}}"
 SKU = Annotated[str, PathParameter(min_length=1, max_length=100, pattern=r"^\S+$")]
 MAX_QUANTITY = 2**63 - 1
@@ -90,6 +93,9 @@ class SharedItemUpdate(BaseModel):
     quantity: int
     revision: int
     waiting: bool = False
+    # Where the change landed (a checked-out cart may have been replaced) and the product's lines there.
+    cart_id: str = ""
+    lines: list[Contribution] = []
 
 
 class CheckoutSession(BaseModel):
@@ -103,6 +109,9 @@ class CartDetail(CartResponse):
     # Set while somebody is checking this cart out; items added meanwhile wait for the next cart.
     checkout: CheckoutSession | None = None
     waiting: list[Contribution] = []
+    # Read together with the contents: how new they are, and which of the caller's own changes they include.
+    revision: int = 0
+    applied: list[str] = []
 
 
 class MemberRequestInput(BaseModel):
@@ -195,19 +204,6 @@ class AddressResponse(AddressInput):
     created_by: str
 
 
-class UserAddressResponse(AddressInput):
-    id: str
-
-
-class PersonalCartItem(BaseModel):
-    sku: str
-    quantity: int
-
-
-class PersonalCartResponse(BaseModel):
-    items: list[PersonalCartItem]
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.jwt_secret = load_jwt_secret()
@@ -244,6 +240,19 @@ async def invalid_request(request: Request, error: RequestValidationError) -> Re
     return await request_validation_exception_handler(request, error)
 
 
+async def database_unavailable(request: Request, error: Exception) -> Response:
+    # A database problem is not a verdict on the request, and it may even have been committed. It can be retried.
+    logger.warning("Database unavailable: %s", type(error).__name__)
+    return JSONResponse(
+        {"detail": "The service is busy. Try again shortly."}, status_code=503,
+        headers={"Retry-After": "1", "Cache-Control": "no-store"},
+    )
+
+
+for error_type in database_unavailable_types():
+    app.add_exception_handler(error_type, database_unavailable)
+
+
 @dataclass
 class RequestIdentity:
     """The caller of one request.
@@ -266,10 +275,7 @@ def apply_account_age(db: DatabaseConnection, caller) -> None:
     if not caller.is_adult:
         return
     statuses = [row["age_status"] for row in db.execute(
-        """SELECT person.age_status FROM household_members AS members
-           JOIN household_member_profiles AS person
-             ON person.household_id = members.household_id AND person.user_id = members.user_id
-           WHERE members.user_id = ? AND members.active = 1""",
+        "SELECT age_status FROM household_members WHERE user_id = ? AND active = 1",
         (caller.user_id,),
     ).fetchall()]
     if statuses and not any(age_allowed(status) for status in statuses):
@@ -300,9 +306,9 @@ Caller = Annotated[RequestIdentity, Depends(require_identity)]
 @contextmanager
 def household_access(
     request: HTTPConnection, household_id: str, caller: Identity, *, write: bool = False,
-    conceal_revoked: bool = False, lock_membership: bool = False,
+    conceal_revoked: bool = False, lock_membership: bool = False, snapshot: bool = False,
 ) -> Iterator[tuple[DatabaseConnection, bool]]:
-    with transaction(request.app.state.db_path, write=write) as db:
+    with transaction(request.app.state.db_path, write=write, snapshot=snapshot) as db:
         if write:
             lock_household(db, household_id)
         member = active_member(db, household_id, caller.user_id, lock=lock_membership)
@@ -337,14 +343,11 @@ def record_cart_change(
 ) -> int:
     notify_changed(db, household_id)
     event = db.execute(
-        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id, reason) VALUES (?, ?, ?, ?) RETURNING id",
-        (household_id, cart_id, actor_id, reason),
+        """INSERT INTO cart_sync_events (household_id, cart_id, actor_id, reason, request_id)
+           VALUES (?, ?, ?, ?, ?) RETURNING id""",
+        (household_id, cart_id, actor_id, reason, event_key(db)),
     ).fetchone()
-    db.execute(
-        """INSERT INTO checkout_cart_revisions (kind, cart_id, revision) VALUES ('household', ?, ?)
-           ON CONFLICT (kind, cart_id) DO UPDATE SET revision = excluded.revision""",
-        (cart_id, event["id"]),
-    )
+    db.execute("UPDATE carts SET revision = ? WHERE id = ?", (event["id"], cart_id))
     return event["id"]
 
 
@@ -374,12 +377,11 @@ def cart_access(cart, caller: Identity, is_primary: bool) -> CartResponse | None
 
 def household_primary_name(db: DatabaseConnection, household_id: str) -> str:
     row = db.execute(
-        """SELECT member_profiles.display_name
-           FROM household_profiles AS household
-           LEFT JOIN household_member_profiles AS member_profiles
-             ON member_profiles.household_id = household.household_id
-            AND member_profiles.user_id = household.created_by
-           WHERE household.household_id = ?""",
+        """SELECT admin.display_name
+           FROM households AS household
+           LEFT JOIN household_members AS admin
+             ON admin.household_id = household.id AND admin.user_id = household.admin_id
+           WHERE household.id = ?""",
         (household_id,),
     ).fetchone()
     return row["display_name"] if row and row["display_name"] else "the household admin"
@@ -416,13 +418,10 @@ def can_delete_cart(db: DatabaseConnection, cart: CartResponse, caller: Identity
 def household_members(db: DatabaseConnection, household_id: str, *, include_roles: bool) -> list[MemberResponse]:
     rows = db.execute(
         """
-        SELECT members.user_id, household.created_by AS owner_id,
-               profiles.display_name, profiles.is_adult, profiles.age_status
+        SELECT members.user_id, household.admin_id AS owner_id,
+               members.display_name, members.is_adult, members.age_status
         FROM household_members AS members
-        JOIN household_profiles AS household ON household.household_id = members.household_id
-        LEFT JOIN household_member_profiles AS profiles
-          ON profiles.household_id = members.household_id
-         AND profiles.user_id = members.user_id
+        JOIN households AS household ON household.id = members.household_id
         WHERE members.household_id = ? AND members.active = 1
         ORDER BY members.user_id
         """,
@@ -459,74 +458,18 @@ def household_response(db: DatabaseConnection, row) -> HouseholdResponse:
     )
 
 
-@app.get(f"{API_PREFIX}/personal-cart")
-def get_personal_cart(request: Request, caller: Caller) -> PersonalCartResponse:
-    with transaction(request.app.state.db_path) as db:
-        rows = db.execute(
-            """SELECT items.sku, items.quantity
-               FROM personal_carts AS cart
-               JOIN personal_cart_items AS items ON items.cart_id = cart.id
-               WHERE cart.user_id = ? ORDER BY items.sku""",
-            (caller.user_id,),
-        )
-        return PersonalCartResponse(items=[PersonalCartItem(**dict(row)) for row in rows])
-
-
-@app.patch(f"{API_PREFIX}/personal-cart/items/{{sku}}")
-def adjust_personal_cart_item(
-    sku: SKU, body: AdjustQuantity, request: Request, caller: Caller
-) -> PersonalCartItem:
-    if body.delta == 0:
-        raise HTTPException(status_code=422, detail="Quantity adjustment cannot be 0")
-    with transaction(request.app.state.db_path) as db:
-        apply_account_age(db, caller)
-    visible_product(request, sku, caller)
-    with transaction(request.app.state.db_path, write=True) as db:
-        cart = personal_cart(db, caller.user_id, lock=True)
-        now = datetime.now(timezone.utc).isoformat()
-        if cart is None:
-            db.execute(
-                """INSERT INTO personal_carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)
-                   ON CONFLICT (user_id) DO NOTHING""",
-                (str(uuid4()), caller.user_id, now, now),
-            )
-            cart = personal_cart(db, caller.user_id, lock=True)
-        cart_id = cart["id"]
-        current = db.execute(
-            "SELECT quantity FROM personal_cart_items WHERE cart_id = ? AND sku = ?",
-            (cart_id, sku),
-        ).fetchone()
-        quantity = max(0, (current["quantity"] if current else 0) + body.delta)
-        if quantity > MAX_QUANTITY:
-            raise HTTPException(status_code=409, detail="Maximum quantity reached")
-        if quantity == 0:
-            db.execute(
-                "DELETE FROM personal_cart_items WHERE cart_id = ? AND sku = ?", (cart_id, sku)
-            )
-        else:
-            db.execute(
-                """INSERT INTO personal_cart_items (cart_id, sku, quantity, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT (cart_id, sku) DO UPDATE SET
-                     quantity = excluded.quantity, updated_at = excluded.updated_at""",
-                (cart_id, sku, quantity, now),
-            )
-        increment_personal_revision(db, cart_id, now)
-        return PersonalCartItem(sku=sku, quantity=quantity)
-
-
 @app.get(f"{API_PREFIX}/households")
 def list_households(request: Request, caller: Caller) -> list[HouseholdResponse]:
     with transaction(request.app.state.db_path) as db:
         rows = db.execute(
             """
             SELECT members.household_id,
-                   CASE WHEN profiles.created_by = members.user_id THEN 'primary' ELSE 'member' END AS role,
-                   profiles.name
+                   CASE WHEN household.admin_id = members.user_id THEN 'primary' ELSE 'member' END AS role,
+                   household.name
             FROM household_members AS members
-            LEFT JOIN household_profiles AS profiles ON profiles.household_id = members.household_id
+            JOIN households AS household ON household.id = members.household_id
             WHERE members.user_id = ? AND members.active = 1
-            ORDER BY profiles.created_at, members.household_id
+            ORDER BY household.created_at, members.household_id
             """,
             (caller.user_id,),
         ).fetchall()
@@ -539,18 +482,12 @@ def create_household(body: CreateHousehold, request: Request, caller: Caller) ->
     cart_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
     with transaction(request.app.state.db_path, write=True) as db:
-        db.execute("INSERT INTO households (id) VALUES (?)", (household_id,))
         db.execute(
-            "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'primary')",
-            (household_id, caller.user_id),
-        )
-        db.execute(
-            "INSERT INTO household_profiles (household_id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO households (id, name, admin_id, created_at) VALUES (?, ?, ?, ?)",
             (household_id, body.name, caller.user_id, now),
         )
         db.execute(
-            """INSERT INTO household_member_profiles
-               (household_id, user_id, display_name, is_adult) VALUES (?, ?, ?, ?)""",
+            "INSERT INTO household_members (household_id, user_id, display_name, is_adult) VALUES (?, ?, ?, ?)",
             (household_id, caller.user_id, body.display_name, int(caller.is_adult)),
         )
         insert_household_address(db, household_id, body.address, caller.user_id)
@@ -683,10 +620,9 @@ def accept_invitation(
     now = datetime.now(timezone.utc)
     with transaction(request.app.state.db_path, write=True) as db:
         invitation = db.execute(
-            """SELECT invitation.*, profiles.name
+            """SELECT invitation.*, household.name
                FROM household_invitations AS invitation
-               LEFT JOIN household_profiles AS profiles
-                 ON profiles.household_id = invitation.household_id
+               LEFT JOIN households AS household ON household.id = invitation.household_id
                WHERE invitation.token_hash = ?""",
             (token_hash,),
         ).fetchone()
@@ -709,16 +645,10 @@ def accept_invitation(
         if not claimed.rowcount:
             raise HTTPException(status_code=400, detail="Invitation is invalid or expired")
         db.execute(
-            """INSERT INTO household_members (household_id, user_id, role, active)
-               VALUES (?, ?, 'member', 1)
-               ON CONFLICT (household_id, user_id) DO UPDATE SET active = 1, role = 'member'""",
-            (household_id, caller.user_id),
-        )
-        db.execute(
-            """INSERT INTO household_member_profiles
-               (household_id, user_id, display_name, is_adult, age_status) VALUES (?, ?, ?, 0, ?)
+            """INSERT INTO household_members (household_id, user_id, active, display_name, is_adult, age_status)
+               VALUES (?, ?, 1, ?, 0, ?)
                ON CONFLICT (household_id, user_id) DO UPDATE SET
-                 display_name = excluded.display_name, is_adult = 0, age_status = excluded.age_status""",
+                 active = 1, display_name = excluded.display_name, is_adult = 0, age_status = excluded.age_status""",
             # Saying "18 or over" is only a claim until this household's primary approves it.
             (household_id, caller.user_id, body.display_name, "PENDING" if caller.is_adult else "NONE"),
         )
@@ -807,10 +737,13 @@ def household_capabilities(household_id: str, request: Request, caller: Caller) 
 
 @app.post(f"{HOUSEHOLD}/carts", status_code=201)
 def create_cart(
-    household_id: str, body: CreateCart, request: Request, caller: Caller
+    household_id: str, body: CreateCart, request: Request, caller: Caller, key: OperationKey = None,
 ) -> CartResponse:
     cart_id = str(uuid4())
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        operation = Operation(db, household_id, caller.user_id, key, ("create-cart", household_id, body.model_dump()))
+        if operation.previous:
+            return CartResponse(**operation.previous)
         require_primary(is_primary)
         if body.adults_only and not can_create_adults_only_cart(caller, is_primary):
             raise HTTPException(status_code=403, detail="Only an adult household admin can create an adults-only cart")
@@ -824,47 +757,56 @@ def create_cart(
             """INSERT INTO cart_grants (household_id, cart_id, member_id)
                SELECT members.household_id, ?, members.user_id
                FROM household_members AS members
-               LEFT JOIN household_member_profiles AS profiles
-                 ON profiles.household_id = members.household_id
-                AND profiles.user_id = members.user_id
                WHERE members.household_id = ? AND members.active = 1
                  AND members.user_id <> ?
-                 AND (? = 0 OR profiles.is_adult = 1)
+                 AND (? = 0 OR members.is_adult = 1)
                ON CONFLICT (cart_id, member_id) DO NOTHING""",
             (cart_id, household_id, caller.user_id, int(body.adults_only)),
         )
         created = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         record_cart_change(db, household_id, cart_id, caller.user_id)
-        return created
+        return operation.save(created)
+
+
+# Keys of the caller's changes whose outcome their browser does not know yet.
+PendingKeys = Annotated[str, Query(max_length=8000)]
 
 
 @app.get(f"{HOUSEHOLD}/carts/{{cart_id}}")
-def get_cart(household_id: str, cart_id: str, request: Request, caller: Caller) -> CartDetail:
-    with household_access(request, household_id, caller) as (db, is_primary):
+def get_cart(
+    household_id: str, cart_id: str, request: Request, caller: Caller, pending: PendingKeys = "",
+) -> CartDetail:
+    named = [key for key in pending.split(",") if key]
+    with household_access(request, household_id, caller, snapshot=True) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         session = checkout_session.stored_session(db, cart_id)
         if session is None or not checkout_session.expired(session):
-            return cart_detail(request, db, cart, caller)
+            return cart_detail(request, db, cart, caller, household_id, named)
     # Somebody left checkout without saying so. Give their waiting items back to the cart.
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         checkout_session.current_session(db, household_id, cart_id)
-        return cart_detail(request, db, cart, caller)
+        return cart_detail(request, db, cart, caller, household_id, named)
 
 
-def cart_detail(request: Request, db: DatabaseConnection, cart: CartResponse, caller: Identity) -> CartDetail:
+def cart_detail(
+    request: Request, db: DatabaseConnection, cart: CartResponse, caller: Identity, household_id: str,
+    named: list[str] | None = None,
+) -> CartDetail:
     session = checkout_session.stored_session(db, cart.id)
     return CartDetail(
         **cart.model_dump(), can_delete_cart=can_delete_cart(db, cart, caller),
         contributions=visible_contributions(request, caller, load_contributions(db, cart.id)),
         waiting=visible_contributions(request, caller, checkout_session.waiting_rows(db, cart.id)),
         checkout=CheckoutSession(user_id=session["user_id"], expires_at=session["expires_at"]) if session else None,
+        revision=household_revision(db, household_id),
+        applied=applied_keys(db, household_id, caller.user_id, named or ()),
     )
 
 
 def member_name(db: DatabaseConnection, household_id: str, user_id: str) -> str:
     row = db.execute(
-        "SELECT display_name FROM household_member_profiles WHERE household_id = ? AND user_id = ?",
+        "SELECT display_name FROM household_members WHERE household_id = ? AND user_id = ?",
         (household_id, user_id),
     ).fetchone()
     return row["display_name"] if row else "Another member"
@@ -904,7 +846,7 @@ def start_checkout(household_id: str, cart_id: str, request: Request, caller: Ca
         checkout_session.save_session(db, household_id, cart_id, caller.user_id)
         if mine is None:
             record_cart_change(db, household_id, cart_id, caller.user_id)
-        detail = cart_detail(request, db, cart, caller)
+        detail = cart_detail(request, db, cart, caller, household_id)
     if mine is None:
         # Everybody's cart is brought up to date now instead of with the next batch.
         request.app.state.live_sync.publish_now()
@@ -972,7 +914,7 @@ def decide_member_age(
         if member["age_status"] == "NONE":
             raise HTTPException(status_code=409, detail="This member said they are under 18")
         db.execute(
-            """UPDATE household_member_profiles SET is_adult = ?, age_status = ?
+            """UPDATE household_members SET is_adult = ?, age_status = ?
                WHERE household_id = ? AND user_id = ?""",
             (int(body.approved), "APPROVED" if body.approved else "REJECTED", household_id, member_id),
         )
@@ -1002,25 +944,14 @@ def promote_member(
             # Nobody could approve them once they are the primary.
             raise HTTPException(status_code=409, detail="Approve or reject this member's age first")
 
-        db.execute(
-            "UPDATE household_members SET role = 'member' WHERE household_id = ? AND user_id = ?",
-            (household_id, caller.user_id),
-        )
-        db.execute(
-            "UPDATE household_members SET role = 'primary' WHERE household_id = ? AND user_id = ?",
-            (household_id, member_id),
-        )
-        db.execute(
-            "UPDATE household_profiles SET created_by = ? WHERE household_id = ?",
-            (member_id, household_id),
-        )
+        db.execute("UPDATE households SET admin_id = ? WHERE id = ?", (member_id, household_id))
         # The previous household owner becomes a regular member and keeps normal
         # access to eligible carts. Primary cart controls follow household ownership.
         db.execute(
             """INSERT INTO cart_grants (household_id, cart_id, member_id)
                SELECT carts.household_id, carts.id, ?
                FROM carts
-               JOIN household_member_profiles AS profile
+               JOIN household_members AS profile
                  ON profile.household_id = carts.household_id AND profile.user_id = ?
                WHERE carts.household_id = ?
                  AND (carts.adults_only = 0 OR profile.is_adult = 1)
@@ -1030,7 +961,7 @@ def promote_member(
         for cart in db.execute("SELECT id FROM carts WHERE household_id = ?", (household_id,)):
             record_cart_change(db, household_id, cart["id"], caller.user_id)
         row = db.execute(
-            "SELECT household_id, 'primary' AS role, name FROM household_profiles WHERE household_id = ?",
+            "SELECT id AS household_id, 'primary' AS role, name FROM households WHERE id = ?",
             (household_id,),
         ).fetchone()
         return household_response(db, row)
@@ -1095,8 +1026,7 @@ def delete_household(household_id: str, request: Request, caller: Caller) -> Res
             (now, now, household_id),
         )
         for cart in db.execute(
-            """SELECT id FROM carts WHERE household_id = ?
-               AND NOT EXISTS (SELECT 1 FROM deleted_carts WHERE deleted_carts.cart_id = carts.id)""", (household_id,),
+            "SELECT id FROM carts WHERE household_id = ? AND deleted = 0", (household_id,),
         ).fetchall():
             delete_cart(db, cart["id"])
             record_cart_change(db, household_id, cart["id"], caller.user_id)
@@ -1108,50 +1038,6 @@ def delete_household(household_id: str, request: Request, caller: Caller) -> Res
         notify_changed(db, household_id)
     request.app.state.live_sync.publish_now()
     return Response(status_code=204)
-
-
-@app.get(f"{API_PREFIX}/addresses")
-def list_user_addresses(request: Request, caller: Caller) -> list[UserAddressResponse]:
-    with transaction(request.app.state.db_path) as db:
-        rows = db.execute(
-            f"SELECT {ADDRESS_FIELDS} FROM user_addresses WHERE user_id = ? ORDER BY created_at, id",
-            (caller.user_id,),
-        )
-        return [UserAddressResponse(**dict(row)) for row in rows]
-
-
-@app.post(f"{API_PREFIX}/addresses", status_code=201)
-def create_user_address(body: AddressInput, request: Request, caller: Caller) -> UserAddressResponse:
-    address_id = str(uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    with transaction(request.app.state.db_path, write=True) as db:
-        db.execute(
-            """INSERT INTO user_addresses
-               (id, user_id, label, recipient_name, address_line1, address_line2,
-                city, postal_code, phone, latitude, longitude, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                address_id, caller.user_id, body.label, body.recipient_name,
-                body.address_line1, body.address_line2 or None, body.city,
-                body.postal_code or None, body.phone or None, body.latitude, body.longitude, now, now,
-            ),
-        )
-    return UserAddressResponse(id=address_id, **body.model_dump())
-
-
-@app.patch(USER_ADDRESS)
-def pin_user_address(
-    address_id: str, body: Coordinates, request: Request, caller: Caller,
-) -> UserAddressResponse:
-    with transaction(request.app.state.db_path, write=True) as db:
-        address = db.execute(
-            f"""UPDATE user_addresses SET latitude = ?, longitude = ?, updated_at = ?
-                WHERE id = ? AND user_id = ? RETURNING {ADDRESS_FIELDS}""",
-            (body.latitude, body.longitude, datetime.now(timezone.utc).isoformat(), address_id, caller.user_id),
-        ).fetchone()
-        if address is None:
-            raise HTTPException(status_code=404, detail="Address not found")
-        return UserAddressResponse(**dict(address))
 
 
 def resolve_address_pin(request: Request, latitude: float | None, longitude: float | None) -> CoverageResult:
@@ -1178,12 +1064,9 @@ def checkout_profile(request: Request, caller: Identity):
 def require_checkout_adult(request: Request, caller: Identity, reference) -> None:
     profile = checkout_profile(request, caller)
     with transaction(request.app.state.db_path) as db:
-        if reference.kind == "household":
-            member = active_member(db, reference.household_id, caller.user_id)
-            if member is not None and not age_allowed(member["age_status"]):
-                caller.is_adult = False
-        else:
-            apply_account_age(db, caller)
+        member = active_member(db, reference.household_id, caller.user_id)
+        if member is not None and not age_allowed(member["age_status"]):
+            caller.is_adult = False
     if not caller.is_adult or not profile["is_adult"]:
         raise checkout.error(403, "AGE_ELIGIBILITY_REQUIRED", "Checkout requires an adult account.")
 
@@ -1272,20 +1155,15 @@ def place_order(
         # Only what was ordered leaves the cart.
         ordered = sorted(set(selection.skus or ()))
         only = f" AND sku IN ({', '.join('?' * len(ordered))})" if ordered else ""
-        if selection.cart.kind == "personal":
-            db.execute(f"DELETE FROM personal_cart_items WHERE cart_id = ?{only}", (state["cart_id"], *ordered))
-            increment_personal_revision(db, state["cart_id"], datetime.now(timezone.utc).isoformat())
-        else:
-            db.execute(
-                f"DELETE FROM cart_item_contributions WHERE cart_id = ?{only}", (selection.cart.cart_id, *ordered),
-            )
-            record_cart_change(
-                db, selection.cart.household_id, selection.cart.cart_id, caller.user_id, reason="order",
-            )
-            next_cart = checkout_session.finish_session(db, selection.cart.household_id, selection.cart.cart_id)
+        db.execute(
+            f"DELETE FROM cart_item_contributions WHERE cart_id = ?{only}", (selection.cart.cart_id, *ordered),
+        )
+        record_cart_change(
+            db, selection.cart.household_id, selection.cart.cart_id, caller.user_id, reason="order",
+        )
+        next_cart = checkout_session.finish_session(db, selection.cart.household_id, selection.cart.cart_id)
         placed = checkout.order_detail(db, order_id, caller.user_id)
-    if selection.cart.kind == "household":
-        request.app.state.live_sync.publish_now()
+    request.app.state.live_sync.publish_now()
     return {**placed, "next_cart": next_cart} if next_cart else placed
 
 
@@ -1307,31 +1185,6 @@ def get_order(order_id: str, request: Request, response: Response, caller: Calle
     response.headers["Cache-Control"] = "no-store"
     with transaction(request.app.state.db_path) as db:
         return checkout.order_detail(db, order_id, caller.user_id)
-
-
-@app.post(f"{USER_ADDRESS}/resolve-store")
-def resolve_user_address(address_id: str, request: Request, caller: Caller) -> CoverageResult:
-    with transaction(request.app.state.db_path) as db:
-        address = db.execute(
-            "SELECT latitude, longitude FROM user_addresses WHERE id = ? AND user_id = ?",
-            (address_id, caller.user_id),
-        ).fetchone()
-        if address is None:
-            raise HTTPException(status_code=404, detail="Address not found")
-    return resolve_address_pin(request, address["latitude"], address["longitude"])
-
-
-@app.delete(USER_ADDRESS, status_code=204)
-def delete_user_address(address_id: str, request: Request, caller: Caller) -> Response:
-    with transaction(request.app.state.db_path, write=True) as db:
-        address = db.execute(
-            "SELECT id FROM user_addresses WHERE id = ? AND user_id = ?",
-            (address_id, caller.user_id),
-        ).fetchone()
-        if address is None:
-            raise HTTPException(status_code=404, detail="Address not found")
-        db.execute("DELETE FROM user_addresses WHERE id = ?", (address_id,))
-    return Response(status_code=204)
 
 
 def insert_household_address(db: DatabaseConnection, household_id: str, body: AddressInput, user_id: str) -> str:
@@ -1444,10 +1297,10 @@ def cart_grantees(db: DatabaseConnection, cart: CartResponse, *, include_creator
         SELECT members.user_id
         FROM carts JOIN household_members AS members ON members.household_id = carts.household_id
         LEFT JOIN cart_grants ON cart_grants.cart_id = carts.id AND cart_grants.member_id = members.user_id
-        LEFT JOIN cart_creator_revocations ON cart_creator_revocations.cart_id = carts.id
-        WHERE carts.id = ? AND members.active = 1 AND members.role <> 'primary'
+        JOIN households AS household ON household.id = carts.household_id
+        WHERE carts.id = ? AND members.active = 1 AND members.user_id <> household.admin_id
             AND (cart_grants.member_id IS NOT NULL OR (
-                ? AND members.user_id = carts.creator_id AND cart_creator_revocations.cart_id IS NULL
+                ? AND members.user_id = carts.creator_id AND carts.creator_revoked = 0
             ))
         ORDER BY members.user_id
         """,
@@ -1456,7 +1309,7 @@ def cart_grantees(db: DatabaseConnection, cart: CartResponse, *, include_creator
     ids = [row["user_id"] for row in rows]
     if include_creator and cart.adults_only:
         adult_rows = db.execute(
-            "SELECT user_id FROM household_member_profiles WHERE household_id = ? AND is_adult = 1",
+            "SELECT user_id FROM household_members WHERE household_id = ? AND is_adult = 1",
             (db.execute("SELECT household_id FROM carts WHERE id = ?", (cart.id,)).fetchone()["household_id"],),
         )
         adult_ids = {row["user_id"] for row in adult_rows}
@@ -1490,7 +1343,7 @@ def grant_access(
         if member["owner_id"] == member_id:
             return Response(status_code=204)
         profile = db.execute(
-            "SELECT is_adult FROM household_member_profiles WHERE household_id = ? AND user_id = ?",
+            "SELECT is_adult FROM household_members WHERE household_id = ? AND user_id = ?",
             (household_id, member_id),
         ).fetchone()
         fixture = MEMBERS_BY_ID.get(member_id)
@@ -1502,7 +1355,7 @@ def grant_access(
                 status_code=403, detail="Adults-only grants require a verified adult member"
             )
         db.execute(
-            "DELETE FROM cart_creator_revocations WHERE cart_id IN (SELECT id FROM carts WHERE id = ? AND creator_id = ?)",
+            "UPDATE carts SET creator_revoked = 0 WHERE id = ? AND creator_id = ?",
             (cart_id, member_id),
         )
         db.execute(
@@ -1526,14 +1379,9 @@ def revoke_access(
             "DELETE FROM cart_grants WHERE cart_id = ? AND member_id = ?", (cart_id, member_id)
         )
         db.execute(
-            """
-            INSERT INTO cart_creator_revocations (cart_id)
-            SELECT carts.id FROM carts JOIN household_members AS members
-                ON members.household_id = carts.household_id AND members.user_id = carts.creator_id
-            JOIN household_profiles AS household ON household.household_id = carts.household_id
-            WHERE carts.id = ? AND carts.creator_id = ? AND household.created_by <> carts.creator_id
-            ON CONFLICT (cart_id) DO NOTHING
-            """,
+            """UPDATE carts SET creator_revoked = 1
+               WHERE id = ? AND creator_id = ?
+                 AND creator_id <> (SELECT admin_id FROM households WHERE households.id = carts.household_id)""",
             (cart_id, member_id),
         )
     return Response(status_code=204)
@@ -1598,11 +1446,24 @@ def change_waiting(
     return total
 
 
+def item_update(
+    request: Request, db: DatabaseConnection, caller: Identity, cart_id: str, sku: str, quantity: int, revision: int,
+    *, waiting: bool = False,
+) -> SharedItemUpdate:
+    rows = checkout_session.waiting_rows(db, cart_id) if waiting else load_contributions(db, cart_id)
+    lines = visible_contributions(request, caller, [row for row in rows if row["sku"] == sku])
+    return SharedItemUpdate(sku=sku, quantity=quantity, revision=revision, waiting=waiting, cart_id=cart_id, lines=lines)
+
+
 @app.patch(f"{HOUSEHOLD}/carts/{{cart_id}}/items/{{sku}}")
 def adjust_shared_quantity(
-    household_id: str, cart_id: str, sku: SKU, body: AdjustQuantity, request: Request, caller: Caller
+    household_id: str, cart_id: str, sku: SKU, body: AdjustQuantity, request: Request, caller: Caller,
+    key: OperationKey = None,
 ) -> SharedItemUpdate:
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        operation = Operation(db, household_id, caller.user_id, key, ("adjust", household_id, cart_id, sku, body.delta))
+        if operation.previous:
+            return SharedItemUpdate(**operation.previous)
         # A tap can arrive just after the cart was checked out and replaced.
         cart_id = checkout_session.open_cart_id(db, cart_id)
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
@@ -1617,7 +1478,7 @@ def adjust_shared_quantity(
                 db, household_id, cart_id, sku, body.delta, caller, is_primary, session, in_cart=total,
             )
             revision = checkout_session.record_waiting_change(db, household_id, cart_id, caller.user_id)
-            return SharedItemUpdate(sku=sku, quantity=total + waiting, revision=revision, waiting=True)
+            return operation.save(item_update(request, db, caller, cart_id, sku, total + waiting, revision, waiting=True))
         if body.delta > 0:
             require_product_for_cart(request, sku, caller, cart)
             if total + body.delta > MAX_QUANTITY:
@@ -1626,7 +1487,7 @@ def adjust_shared_quantity(
             set_contribution(db, household_id, cart_id, sku, caller.user_id, own + body.delta)
             total += body.delta
         elif total == 0:
-            return SharedItemUpdate(sku=sku, quantity=0, revision=household_revision(db, household_id))
+            return operation.save(item_update(request, db, caller, cart_id, sku, 0, household_revision(db, household_id)))
         else:
             # Several fast taps arrive as one request; apply the one-step rule for each.
             # The primary removes their own units first, then other members'; a member
@@ -1657,14 +1518,17 @@ def adjust_shared_quantity(
                 removed += 1
                 total -= 1
         revision = record_cart_change(db, household_id, cart_id, caller.user_id)
-        return SharedItemUpdate(sku=sku, quantity=total, revision=revision)
+        return operation.save(item_update(request, db, caller, cart_id, sku, total, revision))
 
 
 @app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}/items/{{sku}}")
 def remove_shared_item(
-    household_id: str, cart_id: str, sku: SKU, request: Request, caller: Caller
+    household_id: str, cart_id: str, sku: SKU, request: Request, caller: Caller, key: OperationKey = None,
 ) -> SharedItemUpdate:
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        operation = Operation(db, household_id, caller.user_id, key, ("remove", household_id, cart_id, sku))
+        if operation.previous:
+            return SharedItemUpdate(**operation.previous)
         require_visible_cart(db, household_id, cart_id, caller, is_primary)
         require_primary(is_primary)
         session = checkout_session.current_session(db, household_id, cart_id)
@@ -1675,15 +1539,13 @@ def remove_shared_item(
             for row in waiting:
                 checkout_session.set_waiting(db, household_id, cart_id, sku, row["contributor_id"], 0)
             revision = checkout_session.record_waiting_change(db, household_id, cart_id, caller.user_id)
-            return SharedItemUpdate(
-                sku=sku, quantity=shared_quantity(db, cart_id, sku), revision=revision, waiting=True,
-            )
+            return operation.save(item_update(request, db, caller, cart_id, sku, shared_quantity(db, cart_id, sku), revision, waiting=True))
         db.execute(
             "DELETE FROM cart_item_contributions WHERE cart_id = ? AND sku = ?",
             (cart_id, sku),
         )
         revision = record_cart_change(db, household_id, cart_id, caller.user_id)
-        return SharedItemUpdate(sku=sku, quantity=0, revision=revision)
+        return operation.save(item_update(request, db, caller, cart_id, sku, 0, revision))
 
 
 @app.put(f"{HOUSEHOLD}/carts/{{cart_id}}/items/{{sku}}/contributions/me")
@@ -1786,6 +1648,11 @@ def view_for(
     }
     if cart_id is None:
         return view
+    # Which of this viewer's own changes the contents below already include.
+    view["applied"] = (
+        sorted({key for actor, key in snapshot.get("operations", []) if actor == caller.user_id})
+        if batch else snapshot.get("applied", [])
+    )
     selected = next((cart for cart in carts if cart.id == cart_id), None)
     if selected is None:
         view["cart"] = None
@@ -1831,8 +1698,8 @@ def snapshot_grantees(snapshot: dict, cart_id: str) -> list[str]:
     return ids
 
 
-def initial_snapshot(db_path, household_id: str, cart_id: str | None) -> dict:
-    with transaction(db_path) as db:
+def initial_snapshot(db_path, household_id: str, cart_id: str | None, user_id: str, pending: list[str]) -> dict:
+    with transaction(db_path, snapshot=True) as db:
         snapshots, _ = build_snapshots(
             db, [household_id], include_events=False,
             carts_to_load={household_id: {cart_id}} if cart_id else None,
@@ -1840,17 +1707,21 @@ def initial_snapshot(db_path, household_id: str, cart_id: str | None) -> dict:
         if household_id not in snapshots:
             raise AccessEnded("Household not found")
         snapshot = snapshots[household_id]
-        # Same numbering as checkout uses to check the cart has not changed since a quote.
         snapshot["revision"] = household_revision(db, household_id)
+        # Read in the same moment as the contents, and only for this viewer.
+        snapshot["applied"] = applied_keys(db, household_id, user_id, pending)
         return snapshot
 
 
 def live_view(
-    connection: HTTPConnection, household_id: str, caller: Identity, cart_id: str | None, batch: dict | None = None
+    connection: HTTPConnection, household_id: str, caller: Identity, cart_id: str | None, batch: dict | None = None,
+    pending: list[str] | None = None,
 ) -> dict:
     """The cart page view for one viewer: from a published batch, or freshly from the database."""
     try:
-        snapshot = batch if batch is not None else initial_snapshot(connection.app.state.db_path, household_id, cart_id)
+        snapshot = batch if batch is not None else initial_snapshot(
+            connection.app.state.db_path, household_id, cart_id, caller.user_id, pending or [],
+        )
         return view_for(connection, snapshot, caller, cart_id, batch=batch is not None)
     except AccessEnded as ended:
         status = 404 if ended.reason == "Household not found" else 403
@@ -1877,17 +1748,20 @@ async def live_carts(socket: WebSocket, household_id: str, cart_id: str | None =
         if not isinstance(token, str):
             raise InvalidTokenError("Expected token")
         caller = verify_token(token, secret)
+        named = auth.get("pending")
+        pending = [key for key in named if isinstance(key, str)] if isinstance(named, list) else []
         async with sync.subscriber.pubsub() as pubsub:
             await pubsub.subscribe(sync.channel(household_id))
             subscribed = await pubsub.get_message(timeout=5)
             if not subscribed or subscribed["type"] != "subscribe":
                 await socket.close(code=1013)
                 return
+            # Online before reading: a change saved right after the read must not count as unwatched.
+            await sync.mark_online(household_id)
             # The only database read this socket makes: its starting view.
-            view = await asyncio.to_thread(live_view, socket, household_id, caller, cart_id, None)
+            view = await asyncio.to_thread(live_view, socket, household_id, caller, cart_id, None, pending)
             revision = view["revision"]
             await socket.send_json(view)
-            await sync.mark_online(household_id)
             last_presence = asyncio.get_running_loop().time()
             disconnect = asyncio.create_task(socket.receive())
             try:

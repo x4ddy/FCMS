@@ -3,6 +3,8 @@ let activeAccessToken = null
 let accessTokenListener = () => {}
 let refreshPromise = null
 
+const REFRESH_TIMEOUT = 15000
+
 export class ApiError extends Error {
   constructor(status, message, detail = null) {
     super(message)
@@ -22,13 +24,27 @@ export function onAccessTokenChanged(listener) {
   return () => { accessTokenListener = () => {} }
 }
 
+export function currentAccessToken() {
+  return activeAccessToken
+}
+
 export function clearAccessToken() {
   publishAccessToken(null)
 }
 
+/** Whose access token this is. Only used to refuse sending one person's changes as another. */
+function tokenOwner(token) {
+  try { return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).sub } catch { return null }
+}
+
+/** A refresh token works once, so two tabs must not use the same one. */
+function oneTabAtATime(action) {
+  return globalThis.navigator?.locks ? navigator.locks.request('familycart:refresh', action) : action()
+}
+
 async function requestRefreshedSession() {
   const response = await fetch(`${api}/sessions/refresh`, {
-    method: 'POST', credentials: 'include', cache: 'no-store',
+    method: 'POST', credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(REFRESH_TIMEOUT),
   })
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.access_token) {
@@ -42,7 +58,7 @@ async function requestRefreshedSession() {
 
 export function restoreSession() {
   if (refreshPromise) return refreshPromise
-  refreshPromise = requestRefreshedSession().finally(() => { refreshPromise = null })
+  refreshPromise = oneTabAtATime(requestRefreshedSession).finally(() => { refreshPromise = null })
   return refreshPromise
 }
 
@@ -50,9 +66,10 @@ export async function refreshAccessToken() {
   return (await restoreSession()).access_token
 }
 
-async function request(path, { token, method = 'GET', body, retry = true, signal, idempotencyKey, keepalive } = {}) {
+async function request(path, { token, method = 'GET', body, retry = true, signal, idempotencyKey, keepalive, owner } = {}) {
   const headers = {}
   const bearer = token ? (activeAccessToken || token) : null
+  if (owner && tokenOwner(bearer) !== owner) throw new ApiError(401, 'This change belongs to another account.')
   if (bearer) headers.Authorization = `Bearer ${bearer}`
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey
@@ -62,16 +79,26 @@ async function request(path, { token, method = 'GET', body, retry = true, signal
   if (response.status === 401 && token && retry) {
     signal?.throwIfAborted()
     const refreshedToken = await refreshAccessToken()
-    return request(path, { token: refreshedToken, method, body, retry: false, signal, idempotencyKey, keepalive })
+    return request(path, { token: refreshedToken, method, body, retry: false, signal, idempotencyKey, keepalive, owner })
   }
   if (response.status === 204) return
 
   const data = await response.json().catch(() => null)
   if (!response.ok || data === null) {
     const detail = data?.detail
-    throw new ApiError(response.status, errorMessage(detail, response.status), detail)
+    const error = new ApiError(response.status, errorMessage(detail, response.status), detail)
+    error.retryAfter = retryAfterSeconds(response.headers?.get?.('Retry-After'))
+    throw error
   }
   return data
+}
+
+export function retryAfterSeconds(value, now = Date.now()) {
+  if (!value) return 0
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.max(0, seconds)
+  const date = Date.parse(value)
+  return Number.isNaN(date) ? 0 : Math.max(0, (date - now) / 1000)
 }
 
 /** A readable message from an error response: plain text, {message}, or FastAPI's 422 validation list. */
@@ -149,8 +176,8 @@ function listApi(token, lists) {
       token, method: 'DELETE',
     }),
     clearCheckedItems: (id) => request(`${listPath(id)}/items/clear-checked`, { token, method: 'POST' }),
-    moveListToCart: (id, target, itemIds, householdId) => request(`${listPath(id)}/move-to-cart`, {
-      token, method: 'POST', body: { target, item_ids: itemIds, ...(householdId ? { household_id: householdId } : {}) },
+    moveListToCart: (id, target, itemIds, householdId, idempotencyKey) => request(`${listPath(id)}/move-to-cart`, {
+      token, method: 'POST', idempotencyKey, body: { target, item_ids: itemIds, ...(householdId ? { household_id: householdId } : {}) },
     }),
   }
 }
@@ -191,9 +218,14 @@ export function householdApi(token, householdId) {
   return {
     ...addressApi(token, `${household}/addresses`),
     carts: () => request(carts, { token }),
-    create: (name, adultsOnly) => request(carts, { token, method: 'POST', body: { name, adults_only: adultsOnly } }),
+    create: (name, adultsOnly, options) => request(carts, {
+      token, method: 'POST', body: { name, adults_only: adultsOnly }, ...options,
+    }),
     capabilities: () => request(`${household}/capabilities`, { token }),
-    cart: (id) => request(cartPath(id), { token }),
+    // The pending keys are answered in `applied`, read in the same moment as the contents.
+    cart: (id, pending = []) => request(
+      pending.length > 0 ? `${cartPath(id)}?${new URLSearchParams({ pending })}` : cartPath(id), { token },
+    ),
     // Opens checkout, or keeps it open, and returns the cart as it is now.
     startCheckout: (id) => request(`${cartPath(id)}/checkout`, { token, method: 'POST' }),
     // keepalive lets this finish while the page is closing.
@@ -229,11 +261,11 @@ export function householdApi(token, householdId) {
     adjustQuantity: (id, sku, delta) => request(`${contributionPath(id, sku)}/me`, {
       token, method: 'PATCH', body: { delta },
     }),
-    adjustSharedQuantity: (id, sku, delta) => request(`${cartPath(id)}/items/${encodeURIComponent(sku)}`, {
-      token, method: 'PATCH', body: { delta },
+    adjustSharedQuantity: (id, sku, delta, options) => request(`${cartPath(id)}/items/${encodeURIComponent(sku)}`, {
+      token, method: 'PATCH', body: { delta }, ...options,
     }),
-    removeSharedItem: (id, sku) => request(`${cartPath(id)}/items/${encodeURIComponent(sku)}`, {
-      token, method: 'DELETE',
+    removeSharedItem: (id, sku, options) => request(`${cartPath(id)}/items/${encodeURIComponent(sku)}`, {
+      token, method: 'DELETE', ...options,
     }),
     removeContribution: (id, sku, contributor) => request(`${contributionPath(id, sku)}/${encodeURIComponent(contributor)}`, {
       token, method: 'DELETE',
@@ -249,12 +281,12 @@ export function connectLists(token, householdId) {
   return socket
 }
 
-export function connectCarts(token, householdId, cartId) {
+export function connectCarts(token, householdId, cartId, pending = () => []) {
   const household = `${api}/households/${encodeURIComponent(householdId)}`
   const url = new URL(`${household}/live`, window.location.href)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   if (cartId) url.searchParams.set('cart_id', cartId)
   const socket = new WebSocket(url)
-  socket.addEventListener('open', () => socket.send(JSON.stringify({ token: activeAccessToken || token })))
+  socket.addEventListener('open', () => socket.send(JSON.stringify({ token: activeAccessToken || token, pending: pending() })))
   return socket
 }

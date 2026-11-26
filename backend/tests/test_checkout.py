@@ -27,7 +27,6 @@ HOUSEHOLD = f"{API}/households/demo-household"
 REGULAR_CART = f"{HOUSEHOLD}/carts/regular-cart"
 DUBAI = {"latitude": 25.2048, "longitude": 55.2708}
 AL_AIN = {"latitude": 24.2075, "longitude": 55.7447}
-PERSONAL = {"kind": "personal"}
 SHARED = {"kind": "household", "household_id": "demo-household", "cart_id": "regular-cart"}
 
 
@@ -84,26 +83,30 @@ class CheckoutTests(unittest.TestCase):
             self.maps_barrier.wait(timeout=10)
         return self.maps.post(request.url.path, content=request.content, headers={"Content-Type": "application/json"})
 
-    def address(self, pin=DUBAI, *, headers=None, kind="personal", **changes):
-        path = (API if kind == "personal" else HOUSEHOLD) + "/addresses"
-        response = self.cart.post(path, headers=headers or self.owner, json={
+    def address(self, pin=DUBAI, *, headers=None, **changes):
+        response = self.cart.post(f"{HOUSEHOLD}/addresses", headers=headers or self.owner, json={
             "label": "Home", "recipient_name": "Demo Customer", "address_line1": "10 Demo Street", "city": "UAE",
             **pin, **changes,
         })
         self.assertEqual(response.status_code, 201, response.text)
-        return {"kind": kind, "address_id": response.json()["id"]}
+        return {"kind": "household", "address_id": response.json()["id"]}
 
-    def item(self, sku="milk", *, headers=None, shared=False, quantity=1):
-        path = f"{REGULAR_CART}/items/{sku}/contributions/me" if shared else f"{API}/personal-cart/items/{sku}"
-        if shared:
-            response = self.cart.put(path, headers=headers or self.owner, json={"quantity": quantity})
-            self.assertEqual(response.status_code, 200, response.text)
-        else:
-            for _ in range(quantity):
-                response = self.cart.patch(path, headers=headers or self.owner, json={"delta": 1})
-                self.assertEqual(response.status_code, 200, response.text)
+    def item(self, sku="milk", *, headers=None, quantity=1, cart=REGULAR_CART):
+        response = self.cart.patch(f"{cart}/items/{sku}", headers=headers or self.owner, json={"delta": quantity})
+        self.assertEqual(response.status_code, 200, response.text)
 
-    def review(self, address, *, cart=PERSONAL, overrides=None, headers=None, client=None):
+    def contents(self, cart=REGULAR_CART, headers=None):
+        rows = self.cart.get(cart, headers=headers or self.owner).json()["contributions"]
+        return [(row["sku"], row["quantity"]) for row in rows]
+
+    def second_cart(self):
+        """Another household cart, which every member may use."""
+        response = self.cart.post(f"{HOUSEHOLD}/carts", headers=self.owner, json={"name": "Second"})
+        self.assertEqual(response.status_code, 201, response.text)
+        cart_id = response.json()["id"]
+        return f"{HOUSEHOLD}/carts/{cart_id}", {**SHARED, "cart_id": cart_id}
+
+    def review(self, address, *, cart=SHARED, overrides=None, headers=None, client=None):
         return (client or self.cart).post(f"{API}/checkout/quotes", headers=headers or self.owner, json={
             "cart": cart, "default_address": address, "overrides": overrides or [],
         })
@@ -135,7 +138,7 @@ class CheckoutTests(unittest.TestCase):
         response = self.cart.put(f"{REGULAR_CART}/grants/user-adult", headers=self.owner)
         self.assertEqual(response.status_code, 204, response.text)
 
-    def test_personal_order_through_gateway_replays_and_survives_restart(self):
+    def test_order_through_gateway_replays_and_survives_restart(self):
         address = self.address()
         self.item(quantity=2)
         gateway = self.enterContext(TestClient(gateway_app))
@@ -156,9 +159,11 @@ class CheckoutTests(unittest.TestCase):
         placed = first.json()
         path = f"{API}/orders/{placed['order_id']}"
         self.assertEqual((placed["status"], self.stock()), ("PLACED", 98))
-        self.assertEqual(self.cart.get(f"{API}/personal-cart", headers=self.owner).json()["items"], [])
+        self.assertEqual(self.contents(), [])
         self.assertEqual(gateway.get(path, headers=self.member).status_code, 404)
-        self.assertEqual(self.cart.delete(f"{API}/addresses/{address['address_id']}", headers=self.owner).status_code, 204)
+        self.address(recipient_name="Second address")  # a member always keeps one
+        self.assertEqual(self.cart.delete(f"{HOUSEHOLD}/addresses/{address['address_id']}",
+                                          headers=self.owner).status_code, 204)
         initialize_database(self.db)
         with transaction(self.db, write=True) as db:
             checkout.seed_inventory(db, cart_app.state.products)
@@ -166,7 +171,7 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(gateway.get(path, headers=self.owner).json(), placed)
         self.assertEqual(gateway.get(f"{API}/orders", headers=self.owner).json(), {"orders": [{
             "order_id": placed["order_id"], "order_number": placed["order_number"], "placed_at": placed["placed_at"],
-            "currency": "AED", "total_fils": 1500, "status": "PLACED", "is_shared": False, "delivery_count": 1,
+            "currency": "AED", "total_fils": 1500, "status": "PLACED", "is_shared": True, "delivery_count": 1,
         }], "next_cursor": None})
         self.assertEqual(gateway.get(f"{API}/orders", headers=self.member).json(), {"orders": [], "next_cursor": None})
         self.assertEqual(gateway.get(f"{API}/orders").status_code, 401)
@@ -182,9 +187,9 @@ class CheckoutTests(unittest.TestCase):
         self.enterContext(patch.object(cart_app.state.live_sync, "publish_now"))  # leave the event to look at
         self.grant_member()
         dubai = self.address()
-        al_ain = self.address(AL_AIN, kind="household", headers=self.member, recipient_name="Al Ain Recipient")
-        self.item(shared=True, quantity=2)
-        self.item(shared=True, headers=self.member)
+        al_ain = self.address(AL_AIN, headers=self.member, recipient_name="Al Ain Recipient")
+        self.item(quantity=2)
+        self.item(headers=self.member)
         combined = self.quote(dubai, cart=SHARED)["delivery_groups"]
         self.assertEqual(len(combined), 1)
         self.assertEqual({line["contributor_id"]: line["quantity"] for line in combined[0]["lines"]},
@@ -208,11 +213,11 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(summary["delivery_count"], 2)
 
     def test_only_selected_products_are_ordered(self):
-        address = self.address(kind="household")
+        address = self.address()
         self.grant_member()
-        self.item(shared=True, quantity=2)
-        self.item("eggs", shared=True)
-        self.item("bread", shared=True, headers=self.member)
+        self.item(quantity=2)
+        self.item("eggs")
+        self.item("bread", headers=self.member)
 
         def review(skus):
             return self.cart.post(f"{API}/checkout/quotes", headers=self.owner, json={
@@ -231,17 +236,6 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual([(row["sku"], row["quantity"]) for row in left], [("eggs", 1)])
         # The other review names a product that has been ordered since.
         self.assert_problem(self.place(stale, "second"), 409, "QUOTE_STALE")
-
-    def test_selected_personal_products_are_ordered(self):
-        address = self.address()
-        self.item(quantity=1)
-        self.item("eggs")
-        quote = self.cart.post(f"{API}/checkout/quotes", headers=self.owner, json={
-            "cart": PERSONAL, "default_address": address, "skus": ["eggs"],
-        }).json()
-        self.assertEqual(self.place(quote).status_code, 201)
-        items = self.cart.get(f"{API}/personal-cart", headers=self.owner).json()["items"]
-        self.assertEqual([row["sku"] for row in items], ["milk"])
 
     def test_order_history_newest_first_cursor_is_purchaser_scoped(self):
         address = self.address()
@@ -263,14 +257,15 @@ class CheckoutTests(unittest.TestCase):
 
     def test_checkout_permissions_and_address_concealment(self):
         self.grant_member()
-        self.item(shared=True)
+        self.item()
         dubai = self.address()
         private = self.address(headers=self.member)
         quote = self.quote(dubai, cart=SHARED)
         self.assert_problem(self.review(dubai, cart=SHARED, headers=self.member), 404, "ADDRESS_NOT_FOUND")
         self.assert_problem(self.review(dubai, cart=SHARED, headers=self.minor), 403, "AGE_ELIGIBILITY_REQUIRED")
         self.assert_problem(self.review(dubai, cart=SHARED, headers=self.user("unrelated")), 404, "CART_NOT_FOUND")
-        self.assert_problem(self.review(private, cart=SHARED), 404, "ADDRESS_NOT_FOUND")
+        # The admin may deliver to any member's address; members only to their own (checked above).
+        self.assertEqual(self.review(private, cart=SHARED).status_code, 201)
         self.assert_problem(self.place(quote, headers=self.member), 404, "QUOTE_NOT_FOUND")
         self.assert_problem(self.place(quote, headers=self.minor), 403, "AGE_ELIGIBILITY_REQUIRED")
         body = {"cart": SHARED, "default_address": dubai, "is_adult": True}
@@ -281,14 +276,14 @@ class CheckoutTests(unittest.TestCase):
 
     def test_invalid_coverages_keep_all_delivery_groups(self):
         self.grant_member()
-        self.item(shared=True)
-        self.item(shared=True, headers=self.member)
+        self.item()
+        self.item(headers=self.member)
         dubai = self.address()
         for pin, status, code in [
             ({}, 409, "ADDRESS_NEEDS_PIN"),
             ({"latitude": 0, "longitude": 0}, 409, "OUTSIDE_DELIVERY_AREA"),
         ]:
-            outside = self.address(pin, kind="household")
+            outside = self.address(pin)
             error = self.review(dubai, cart=SHARED, overrides=[{"contributor_id": "user-adult", "address": outside}])
             self.assert_problem(error, status, code)
             groups = error.json()["detail"]["delivery_groups"]
@@ -307,10 +302,10 @@ class CheckoutTests(unittest.TestCase):
         edited = self.quote(address)
         # Restoring the same quantities still advances the cart revision.
         self.item()
-        self.cart.patch(f"{API}/personal-cart/items/milk", headers=self.owner, json={"delta": -1})
+        self.item(quantity=-1)
         self.assert_problem(self.place(edited), 409, "QUOTE_STALE")
         moved = self.quote(address)
-        target = f"{API}/addresses/{address['address_id']}"
+        target = f"{HOUSEHOLD}/addresses/{address['address_id']}"
         self.assertEqual(self.cart.patch(target, headers=self.owner, json=AL_AIN).status_code, 200)
         self.assert_problem(self.place(moved), 409, "QUOTE_STALE")
         priced = self.quote(address)
@@ -326,11 +321,13 @@ class CheckoutTests(unittest.TestCase):
         self.assert_problem(self.place(second, "new-key"), 409, "QUOTE_STALE")
 
     def test_unrelated_cart_edits_do_not_invalidate_quote(self):
+        self.grant_member()
+        other, _ = self.second_cart()
         self.item()
         address = self.address()
         quote = self.quote(address)
-        self.item(shared=True)
-        self.item(headers=self.member)
+        self.item(cart=other)
+        self.item(cart=other, headers=self.member)
         self.assertEqual(self.place(quote).status_code, 201)
 
     def test_decline_and_fault_after_first_deduction_rollback(self):
@@ -351,16 +348,16 @@ class CheckoutTests(unittest.TestCase):
             self.assertEqual(self.place(quote, "retry").status_code, 500)
         self.assertEqual(updates, ["eggs", "milk"])
         self.assertEqual((self.stock(), self.stock("eggs")), (100, 100))
-        self.assertEqual(len(self.cart.get(f"{API}/personal-cart", headers=self.owner).json()["items"]), 2)
+        self.assertEqual(len(self.contents()), 2)
         self.assertEqual(self.place(quote, "retry").status_code, 201)
         self.assertEqual((self.stock(), self.stock("eggs")), (99, 99))
 
     def test_same_store_groups_share_inventory(self):
         self.grant_member()
-        self.item("honey", shared=True)
-        self.item("honey", shared=True, headers=self.member)
+        self.item("honey")
+        self.item("honey", headers=self.member)
         default = self.address()
-        secondary = self.address(kind="household", headers=self.member)
+        secondary = self.address(headers=self.member)
         result = self.review(default, cart=SHARED, overrides=[{"contributor_id": "user-adult", "address": secondary}])
         self.assert_problem(result, 409, "OUT_OF_STOCK")
         shortages = result.json()["detail"]["shortages"]
@@ -379,25 +376,31 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(self.stock(), 99)
 
     def test_concurrent_carts_compete_for_last_unit(self):
+        other, other_ref = self.second_cart()
         self.item("honey")
-        self.item("honey", headers=self.member)
+        self.item("honey", headers=self.member, cart=other)
         owner_quote = self.quote(self.address())
-        member_quote = self.quote(self.address(headers=self.member), headers=self.member)
+        member_quote = self.quote(self.address(headers=self.member), cart=other_ref, headers=self.member)
         self.maps_barrier = Barrier(2)
         with ThreadPoolExecutor(max_workers=2) as workers:
             owner = workers.submit(self.place, owner_quote)
             member = workers.submit(self.place, member_quote, headers=self.member)
             responses = [owner.result(), member.result()]
         self.assertEqual(sorted(response.status_code for response in responses), [201, 409])
-        lose = [self.owner, self.member][next(i for i, response in enumerate(responses) if response.status_code == 409)]
+        lose = [REGULAR_CART, other][next(i for i, response in enumerate(responses) if response.status_code == 409)]
         self.assert_problem(next(response for response in responses if response.status_code == 409), 409, "OUT_OF_STOCK")
         self.assertEqual(self.stock("honey"), 0)
-        self.assertEqual(self.cart.get(f"{API}/personal-cart", headers=lose).json()["items"], [{"sku": "honey", "quantity": 1}])
+        self.assertEqual(self.contents(lose), [("honey", 1)])
 
     def test_authoritative_age_and_disabled_mock_override(self):
         tokens = create_session(self.users, self.secret, Identity("new-google-user", False), "New user",
                                 google_subject="new-google-user")
         headers = authorization(tokens)
+        # A member from before age checks existed, so only the account's own age decides.
+        with transaction(self.db, write=True) as db:
+            db.execute("""INSERT INTO household_members (household_id, user_id, display_name)
+                          VALUES ('demo-household', 'new-google-user', 'New user')""")
+        self.assertEqual(self.cart.put(f"{REGULAR_CART}/grants/new-google-user", headers=self.owner).status_code, 204)
         address = self.address(headers=headers)
         self.item(headers=headers)
         self.assert_problem(self.review(address, headers=headers), 403, "AGE_ELIGIBILITY_REQUIRED")

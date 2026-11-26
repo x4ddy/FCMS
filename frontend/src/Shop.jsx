@@ -32,10 +32,11 @@ function CartControl({ product, shop }) {
   const quantity = shop.quantities[product.sku] ?? 0
   if (shop.needsHousehold) return null
   if (product.min_age > 0 && !shop.adultsOnly) return <span className="card-note">18+ cart only</span>
-  if (quantity < 1) return <button className="add-button" disabled={!shop.canEdit}
+  const busy = shop.unresolved.has(product.sku)
+  if (quantity < 1 && !busy) return <button className="add-button" disabled={!shop.canEdit}
     aria-label={`Add ${product.name}`} onClick={() => shop.onAdjust(product, 1)}>ADD <span aria-hidden="true">+</span></button>
   return <Stepper label={product.name} quantity={quantity} disabled={!shop.canEdit} canRemove={shop.canRemove(product.sku)}
-    removeHint="You cannot remove this right now" onAdjust={(delta) => shop.onAdjust(product, delta)} />
+    removeHint="You cannot remove this right now" busy={busy} onAdjust={(delta) => shop.onAdjust(product, delta)} />
 }
 
 /** Only cards whose own state changed are drawn again. */
@@ -44,7 +45,7 @@ function sameCard(before, after) {
   const b = after.shop
   const { sku } = after.product
   return before.product === after.product && before.onOpen === after.onOpen && before.onWish === after.onWish && before.wished === after.wished
-    && a.quantities[sku] === b.quantities[sku] && a.canEdit === b.canEdit && a.adultsOnly === b.adultsOnly
+    && a.quantities[sku] === b.quantities[sku] && a.unresolved.has(sku) === b.unresolved.has(sku) && a.canEdit === b.canEdit && a.adultsOnly === b.adultsOnly
     && a.needsHousehold === b.needsHousehold && a.canRemove(sku) === b.canRemove(sku) && a.onAdjust === b.onAdjust
 }
 

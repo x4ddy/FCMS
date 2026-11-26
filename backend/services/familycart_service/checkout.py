@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.services.maps_service.app import STORES
 from backend.shared.database import DatabaseConnection
 
-from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, load_carts, load_contributions, lock_household, personal_cart
+from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, load_carts, load_contributions, lock_household
 
 
 class CheckoutInput(BaseModel):
@@ -22,10 +22,6 @@ class CheckoutInput(BaseModel):
 ReferenceID = Annotated[str, Field(min_length=1, max_length=128)]
 
 
-class PersonalCart(CheckoutInput):
-    kind: Literal["personal"]
-
-
 class HouseholdCart(CheckoutInput):
     kind: Literal["household"]
     household_id: ReferenceID
@@ -33,7 +29,7 @@ class HouseholdCart(CheckoutInput):
 
 
 class AddressRef(CheckoutInput):
-    kind: Literal["personal", "household"]
+    kind: Literal["household"]
     address_id: ReferenceID
 
 
@@ -43,7 +39,7 @@ class AddressOverride(CheckoutInput):
 
 
 class QuoteInput(CheckoutInput):
-    cart: Annotated[PersonalCart | HouseholdCart, Field(discriminator="kind")]
+    cart: HouseholdCart
     default_address: AddressRef
     overrides: list[AddressOverride] = Field(default_factory=list)
     # Products to order. Everything else stays in the cart. None orders the whole cart.
@@ -77,20 +73,10 @@ def seed_inventory(db: DatabaseConnection, products) -> None:
 
 
 def lock_cart(db, reference, caller) -> None:
-    if reference.kind == "personal":
-        personal_cart(db, caller.user_id, lock=True)
-    else:
-        lock_household(db, reference.household_id)
+    lock_household(db, reference.household_id)
 
 
 def cart_state(db, reference, caller):
-    if reference.kind == "personal":
-        cart = personal_cart(db, caller.user_id)
-        rows = [] if cart is None else [dict(row) for row in db.execute(
-            "SELECT sku, quantity FROM personal_cart_items WHERE cart_id = ? ORDER BY sku", (cart["id"],),
-        )]
-        return cart, rows, {}
-
     household_id = reference.household_id
     member = active_member(db, household_id, caller.user_id)
     if member is None:
@@ -105,30 +91,24 @@ def cart_state(db, reference, caller):
     if not granted:
         raise error(404, "CART_NOT_FOUND", "Cart not found.")
     names = {row["user_id"]: row["display_name"] for row in db.execute(
-        "SELECT user_id, display_name FROM household_member_profiles WHERE household_id = ?", (household_id,),
+        "SELECT user_id, display_name FROM household_members WHERE household_id = ?", (household_id,),
     )}
     return cart, load_contributions(db, cart["id"]), names
 
 
 def saved_address(db, reference, address, user_id: str, *, lock: bool) -> dict:
-    if address.kind == "household" and reference.kind == "personal":
-        raise error(422, "INVALID_ADDRESS_KIND", "Choose one of your personal addresses.")
-    table, ownership, owner = (
-        ("user_addresses", "user_id", user_id) if address.kind == "personal" else
-        ("household_addresses", "household_id", reference.household_id)
-    )
-    parameters = [address.address_id, owner]
+    parameters = [address.address_id, reference.household_id]
     row_lock = " FOR SHARE" if lock and db.dialect == "postgresql" else ""
     # An address leaves with the member who added it.
-    active = f" AND {ACTIVE_ADDRESS}" if address.kind == "household" else ""
-    if address.kind == "household":
-        # Same rule as the address list: only the admin can use other members' addresses.
-        member = active_member(db, reference.household_id, user_id)
-        if member is None or member["owner_id"] != user_id:
-            active += " AND created_by = ?"
-            parameters.append(user_id)
+    active = f" AND {ACTIVE_ADDRESS}"
+    # Same rule as the address list: only the admin can use other members' addresses.
+    member = active_member(db, reference.household_id, user_id)
+    if member is None or member["owner_id"] != user_id:
+        active += " AND created_by = ?"
+        parameters.append(user_id)
     row = db.execute(
-        f"SELECT {ADDRESS_FIELDS}, updated_at FROM {table} WHERE id = ? AND {ownership} = ?" + active + row_lock,
+        f"SELECT {ADDRESS_FIELDS}, updated_at FROM household_addresses WHERE id = ? AND household_id = ?"
+        + active + row_lock,
         parameters,
     ).fetchone()
     if row is None:
@@ -182,7 +162,7 @@ def snapshot(db, selection: QuoteInput, caller, products, *, lock: bool) -> dict
         })
         group["subtotal_fils"] += total
     revision = db.execute(
-        "SELECT revision FROM checkout_cart_revisions WHERE kind = ? AND cart_id = ?", (reference.kind, cart["id"]),
+        "SELECT revision FROM carts WHERE id = ?", (cart["id"],),
     ).fetchone()
     return {
         "cart_id": cart["id"], "cart_revision": revision["revision"] if revision else 0,

@@ -330,9 +330,6 @@ class LiveSyncTests(unittest.TestCase):
         self.assertEqual(self.client.patch(item, headers=self.member, json={"delta": -1}).status_code, 403)
         self.assertEqual(self.client.patch(item, headers=self.primary, json={"delta": -9}).json()["quantity"], 0)
         self.assertEqual(self.client.patch(item, headers=self.primary, json={"delta": 100}).status_code, 422)
-        personal = "/api/v1/personal-cart/items/milk"
-        self.assertEqual(self.client.patch(personal, headers=self.member, json={"delta": 4}).json()["quantity"], 4)
-        self.assertEqual(self.client.patch(personal, headers=self.member, json={"delta": -9}).json()["quantity"], 0)
 
     def test_changes_made_during_a_redis_outage_are_delivered_when_it_returns(self) -> None:
         from datetime import datetime, timedelta, timezone

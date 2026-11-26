@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
+import { newKey } from './cartQueue.js'
+import { isUnconfirmed } from './checkoutState.js'
 import { Avatar, confirmAction, Dropdown, Icon, ProductImage } from './ui.jsx'
 import {
   applyChanges, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, mergeListUpdate, parsePastedList, parseQuickAdd,
@@ -437,6 +439,8 @@ function ShoppingLists({
   const inFlight = useRef(0)
   // Quick edits waiting to be sent together, and the send in progress.
   const queue = useRef(null)
+  // A move whose outcome is unknown. Pressing the button again repeats it instead of adding everything twice.
+  const moveAttempt = useRef(null)
   const queueTimer = useRef(null)
   const lastSend = useRef(Promise.resolve(true))
   // Parent callbacks change identity on every render; keep them in refs so
@@ -692,10 +696,21 @@ function ShoppingLists({
           onClearDone={() => run(async () => {
             if (await sendQueue()) setDetail(await saving(() => api.clearCheckedItems(detail.id)))
           })}
-          onMove={(cartId, itemIds) => run(async () => {
+          onMove={(cartId, chosen) => run(async () => {
+            const itemIds = [...chosen].sort()
             // Save waiting quantities first, so the cart gets what is on screen.
             if (!await sendQueue()) return
-            const result = await saving(() => api.moveListToCart(detail.id, cartId, itemIds, mine ? household.id : null))
+            const what = JSON.stringify([detail.id, cartId, itemIds, household?.id])
+            const key = moveAttempt.current?.what === what ? moveAttempt.current.key : newKey()
+            moveAttempt.current = { what, key }
+            let result
+            try {
+              result = await saving(() => api.moveListToCart(detail.id, cartId, itemIds, mine ? household.id : null, key))
+            } catch (error) {
+              if (!isUnconfirmed(error)) moveAttempt.current = null
+              throw error
+            }
+            moveAttempt.current = null
             const cartName = carts.find((cart) => cart.id === cartId)?.name ?? 'the cart'
             if (result.moved.length > 0) {
               notify(`Added ${result.moved.length} ${result.moved.length === 1 ? 'product' : 'products'} to ${cartName}.`)

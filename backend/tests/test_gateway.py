@@ -76,9 +76,10 @@ class GatewaySecurityTests(unittest.TestCase):
             self.fake.requests[-1][1],
             "http://127.0.0.1:8002/api/v1/households",
         )
-        personal = self.client.get("/api/v1/personal-cart", headers=headers)
-        self.assertEqual(personal.status_code, 200)
+        orders = self.client.get("/api/v1/orders", headers=headers)
+        self.assertEqual(orders.status_code, 200)
         self.assertEqual(
             self.fake.requests[-1][1],
-            "http://127.0.0.1:8002/api/v1/personal-cart",
+            "http://127.0.0.1:8002/api/v1/orders",
         )
+        self.assertEqual(self.client.get("/api/v1/personal-cart", headers=headers).status_code, 404)

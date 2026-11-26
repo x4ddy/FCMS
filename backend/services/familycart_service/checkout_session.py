@@ -15,6 +15,7 @@ from backend.shared.database import DatabaseConnection
 
 from .db import delete_cart, set_contribution
 from .live_sync import notify_changed
+from .operations import event_key
 
 # The browser renews every minute, so a closed tab frees the cart soon after this.
 SESSION_LENGTH = timedelta(minutes=3)
@@ -39,10 +40,12 @@ def stored_session(db: DatabaseConnection, cart_id: str):
 def record_waiting_change(db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None) -> int:
     """Tell live viewers, without changing the cart revision the open review is checked against."""
     notify_changed(db, household_id)
-    return db.execute(
-        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id) VALUES (?, ?, ?) RETURNING id",
-        (household_id, cart_id, actor_id),
+    revision = db.execute(
+        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id, request_id) VALUES (?, ?, ?, ?) RETURNING id",
+        (household_id, cart_id, actor_id, event_key(db)),
     ).fetchone()["id"]
+    db.execute("UPDATE carts SET live_revision = ? WHERE id = ?", (revision, cart_id))
+    return revision
 
 
 def current_session(db: DatabaseConnection, household_id: str, cart_id: str):
@@ -112,8 +115,7 @@ def end_session(db: DatabaseConnection, household_id: str, cart_id: str, actor_i
 
 def unused_name(db: DatabaseConnection, household_id: str, name: str) -> str:
     taken = {row["name"] for row in db.execute(
-        """SELECT name FROM carts WHERE household_id = ?
-           AND NOT EXISTS (SELECT 1 FROM deleted_carts WHERE deleted_carts.cart_id = carts.id)""", (household_id,),
+        "SELECT name FROM carts WHERE household_id = ? AND deleted = 0", (household_id,),
     )}
     number = 2
     while True:
@@ -134,28 +136,27 @@ def finish_session(db: DatabaseConnection, household_id: str, cart_id: str) -> d
     db.execute("DELETE FROM checkout_sessions WHERE cart_id = ?", (cart_id,))
     if not waiting_rows(db, cart_id):
         return None
-    old = db.execute("SELECT creator_id, name, adults_only FROM carts WHERE id = ?", (cart_id,)).fetchone()
+    old = db.execute(
+        "SELECT creator_id, name, adults_only, creator_revoked FROM carts WHERE id = ?", (cart_id,),
+    ).fetchone()
     emptied = db.execute(
         "SELECT 1 FROM cart_item_contributions WHERE cart_id = ? LIMIT 1", (cart_id,),
     ).fetchone() is None
     new_id = str(uuid4())
     name = old["name"] if emptied else unused_name(db, household_id, old["name"])
     db.execute(
-        "INSERT INTO carts (id, household_id, creator_id, name, adults_only) VALUES (?, ?, ?, ?, ?)",
-        (new_id, household_id, old["creator_id"], name, old["adults_only"]),
+        """INSERT INTO carts (id, household_id, creator_id, name, adults_only, creator_revoked)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (new_id, household_id, old["creator_id"], name, old["adults_only"], old["creator_revoked"]),
     )
     db.execute(
         """INSERT INTO cart_grants (household_id, cart_id, member_id)
            SELECT household_id, ?, member_id FROM cart_grants WHERE cart_id = ?""", (new_id, cart_id),
     )
-    db.execute(
-        "INSERT INTO cart_creator_revocations (cart_id) SELECT ? FROM cart_creator_revocations WHERE cart_id = ?",
-        (new_id, cart_id),
-    )
     move_waiting(db, household_id, cart_id, new_id, MAX_QUANTITY)
     if emptied:
         delete_cart(db, cart_id)
-        db.execute("UPDATE deleted_carts SET next_cart_id = ? WHERE cart_id = ?", (new_id, cart_id))
+        db.execute("UPDATE carts SET next_cart_id = ? WHERE id = ?", (new_id, cart_id))
     record_cart_change(db, household_id, new_id)
     return {"id": new_id, "name": name, "replaces": emptied}
 
@@ -163,7 +164,7 @@ def finish_session(db: DatabaseConnection, household_id: str, cart_id: str) -> d
 def open_cart_id(db: DatabaseConnection, cart_id: str) -> str:
     """Follow a cart that was checked out to the new cart that took its place."""
     for _ in range(20):
-        row = db.execute("SELECT next_cart_id FROM deleted_carts WHERE cart_id = ?", (cart_id,)).fetchone()
+        row = db.execute("SELECT next_cart_id FROM carts WHERE id = ? AND deleted = 1", (cart_id,)).fetchone()
         if row is None or row["next_cart_id"] is None:
             return cart_id
         cart_id = row["next_cart_id"]

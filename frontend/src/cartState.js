@@ -80,33 +80,28 @@ export function withTaps(quantities, ...taps) {
   return next
 }
 
-/**
- * Apply a saved change the way the server does: adding goes to your own line,
- * removing takes your own units first and then other members'.
- */
-export function applyAdjustment(contributions, sku, delta, userId) {
-  const rows = contributions.map((row) => ({ ...row }))
-  if (delta > 0) {
-    const own = rows.find((row) => row.sku === sku && row.contributor_id === userId)
-    if (own) own.quantity += delta
-    else rows.push({ sku, contributor_id: userId, quantity: delta })
-    return rows
-  }
-  let remaining = -delta
-  const order = rows.filter((row) => row.sku === sku).sort((a, b) =>
-    (b.contributor_id === userId) - (a.contributor_id === userId) || (a.contributor_id < b.contributor_id ? -1 : 1))
-  for (const row of order) {
-    const taken = Math.min(remaining, row.quantity)
-    row.quantity -= taken
-    remaining -= taken
-  }
-  return rows.filter((row) => row.quantity > 0)
+/** Quantities with changes that are not confirmed yet on top, in the order they were made. */
+export function withOperations(quantities, operations) {
+  const next = { ...quantities }
+  for (const { kind, sku, delta } of operations) next[sku] = kind === 'remove' ? 0 : Math.max(0, (next[sku] ?? 0) + delta)
+  return next
 }
 
-/** One row per product in the cart, in catalogue order, with everyone who added it. */
-export function cartRows(contributions, quantities, products) {
-  const rows = products.filter((product) => quantities[product.sku] > 0)
-    .map((product) => ({ sku: product.sku, product, quantity: quantities[product.sku] }))
+/** The cart with one confirmed change, unless what is shown is already newer and so contains it. */
+export function applyConfirmed(cart, update) {
+  if (!cart || cart.id !== update.cart_id || (cart.revision ?? 0) >= update.revision) return cart
+  const part = update.waiting ? 'waiting' : 'contributions'
+  return {
+    ...cart, revision: update.revision,
+    [part]: [...(cart[part] ?? []).filter((row) => row.sku !== update.sku), ...update.lines],
+  }
+}
+
+/** One row per product in the cart, in catalogue order, with everyone who added it. Unresolved ones stay, even at 0. */
+export function cartRows(contributions, quantities, products, unresolved = new Set()) {
+  const listed = (sku) => quantities[sku] > 0 || unresolved.has(sku)
+  const rows = products.filter((product) => listed(product.sku))
+    .map((product) => ({ sku: product.sku, product, quantity: quantities[product.sku] ?? 0 }))
   const known = new Set(products.map((product) => product.sku))
   for (const sku of Object.keys(quantities)) {
     if (!known.has(sku) && quantities[sku] > 0) rows.push({ sku, product: null, quantity: quantities[sku] })

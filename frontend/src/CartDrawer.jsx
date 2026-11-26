@@ -32,7 +32,7 @@ function NewCart({ busy, canAdultsOnly, onCreate }) {
   </details>
 }
 
-function CartRow({ row, cart, user, names, isPrimary, selectable, selected, onSelect, locked, canRemove, onAdjust, onRemove }) {
+function CartRow({ row, cart, user, names, isPrimary, selectable, selected, onSelect, locked, canRemove, busy, onAdjust, onRemove }) {
   const label = row.product?.name ?? row.sku
   return <li className={`cart-row${selected ? ' selected' : ''}`}>
     {selectable && <Tick label={`Select ${label} for checkout`} checked={selected} onChange={onSelect} />}
@@ -48,7 +48,7 @@ function CartRow({ row, cart, user, names, isPrimary, selectable, selected, onSe
       <span className="price">{row.product ? money(row.product.price_fils * row.quantity) : 'Unavailable'}</span>
       <span className="cart-row-actions">
         {locked ? <strong className="quantity">× {row.quantity}</strong> : cart.can_edit_items && row.product && <Stepper label={label} quantity={row.quantity}
-          canRemove={canRemove} removeHint="Only the admin can remove what others added" onAdjust={onAdjust} />}
+          canRemove={canRemove} removeHint="Only the admin can remove what others added" busy={busy} onAdjust={onAdjust} />}
         {isPrimary && !locked && <button className="icon-button" aria-label={`Remove ${label}`} title="Remove" onClick={onRemove}>
           <Icon name="trash" size={18} /></button>}
       </span>
@@ -57,7 +57,7 @@ function CartRow({ row, cart, user, names, isPrimary, selectable, selected, onSe
 }
 
 export function CartView({
-  carts, cart, cartId, rows, waitingRows, user, household, members, names, grants, selected, busy, saving, live, canAdultsOnly,
+  carts, cart, cartId, rows, waitingRows, user, household, members, names, grants, selected, busy, unresolved, live, canAdultsOnly,
   checkoutBy, mine, canRemove, onEndCheckout, onSelectCart, onToggle, onSelectAll, onAdjust, onRemove, onChangeGrant, onDeleteCart, onCreateCart, onCheckout,
 }) {
   const isPrimary = household.role === 'primary'
@@ -85,7 +85,7 @@ export function CartView({
         <div className="section-head cart-title">
           <h3>{cart.name}</h3>
           <span className={`live-badge ${live ? 'on' : ''}`} title="Changes from others appear within about 20 seconds">
-            <span aria-hidden="true" />{saving ? 'Saving' : live ? 'Live' : 'Reconnecting'}</span>
+            <span aria-hidden="true" />{live && 'Live'}</span>
         </div>
         {locked && <div className="banner row" role="status">
           <span><strong>{checkoutBy} {mine ? 'are' : 'is'} checking out this cart</strong>
@@ -101,13 +101,13 @@ export function CartView({
           </div>}
           <ul className="cart-rows">{rows.map((row) => <CartRow key={row.sku} row={row} cart={cart} user={user} names={names}
             isPrimary={isPrimary} selectable={selectable && Boolean(row.product)} selected={selectable && selected.has(row.sku)}
-            onSelect={() => onToggle(row.sku)} locked={locked} canRemove={canRemove(row.sku)}
+            onSelect={() => onToggle(row.sku)} locked={locked} canRemove={canRemove(row.sku)} busy={unresolved.has(row.sku)}
             onAdjust={(delta) => onAdjust(row.product, delta)} onRemove={() => onRemove(row)} />)}</ul>
         </>}
         {waitingRows.length > 0 && <>
           <div className="section-head cart-title"><h3>Waiting for the next cart</h3></div>
           <ul className="cart-rows waiting">{waitingRows.map((row) => <CartRow key={row.sku} row={row} cart={cart} user={user} names={names}
-            isPrimary={isPrimary} canRemove={canRemove(row.sku)} onAdjust={(delta) => onAdjust(row.product, delta)}
+            isPrimary={isPrimary} canRemove={canRemove(row.sku)} busy={unresolved.has(row.sku)} onAdjust={(delta) => onAdjust(row.product, delta)}
             onRemove={() => onRemove(row)} />)}</ul>
         </>}
         {cart.can_manage_access && <details className="fold">

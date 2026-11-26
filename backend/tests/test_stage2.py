@@ -176,8 +176,8 @@ class StageTwoTests(unittest.TestCase):
         payload = {"name": "Adult shopping", "adults_only": True}
         self.assertEqual(self.cart.post(CARTS, headers=self.child, json=payload).status_code, 403)
         with closing(sqlite3.connect(self.db_path)) as db, db:
-            db.execute("INSERT INTO household_members VALUES ('demo-household', 'adult-member', 'member', 1)")
-            db.execute("INSERT INTO household_members VALUES ('demo-household', 'minor-primary', 'primary', 1)")
+            db.execute("""INSERT INTO household_members (household_id, user_id, display_name)
+                          VALUES ('demo-household', 'adult-member', 'Adult'), ('demo-household', 'minor-primary', 'Minor')""")
         for identity in (Identity("adult-member", True), Identity("minor-primary", False)):
             headers = {"Authorization": f"Bearer {issue_token(identity, self.secret)}"}
             self.assertFalse(self.cart.get(capabilities, headers=headers).json()["can_create_adults_only_cart"])
@@ -197,10 +197,11 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.cart.put(f"{ADULTS_ONLY}/grants/user-child", headers=self.primary).status_code, 403)
         self.assertEqual(self.cart.put(f"{REGULAR}/grants/unknown", headers=self.primary).status_code, 404)
         with closing(sqlite3.connect(self.db_path)) as db, db:
-            db.execute("INSERT INTO households VALUES ('elsewhere')")
-            db.execute("INSERT INTO household_members VALUES ('elsewhere', 'user-primary', 'primary', 1)")
-            db.execute("INSERT INTO carts VALUES ('outside-cart', 'elsewhere', 'user-primary', 'Outside', 0)")
-            db.execute("INSERT INTO household_members VALUES ('demo-household', 'unknown', 'member', 1)")
+            db.execute("INSERT INTO households VALUES ('elsewhere', 'Elsewhere', 'user-primary', '2026-01-01')")
+            db.execute("""INSERT INTO household_members (household_id, user_id, display_name)
+                          VALUES ('elsewhere', 'user-primary', 'Primary'), ('demo-household', 'unknown', 'Unknown')""")
+            db.execute("""INSERT INTO carts (id, household_id, creator_id, name, adults_only)
+                          VALUES ('outside-cart', 'elsewhere', 'user-primary', 'Outside', 0)""")
         self.assertEqual(self.cart.put(f"{ADULTS_ONLY}/grants/unknown", headers=self.primary).status_code, 403)
         self.assertEqual(self.cart.get(f"{CARTS}/outside-cart", headers=self.primary).status_code, 404)
         outside = "/api/v1/households/elsewhere/carts/outside-cart"

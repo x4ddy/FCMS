@@ -2,7 +2,7 @@
 
 Lists are planning tools: any active household member can view them, add
 items, edit quantities and tick items off. Catalogue items can then be moved
-into a shared cart or the caller's personal cart, which applies the existing
+into a shared cart, which applies the existing
 cart access and adults-only rules.
 
 This module is imported at the bottom of ``app.py`` (after the shared access
@@ -31,6 +31,7 @@ from .app import (
     change_waiting, require_visible_cart, shared_quantity, viewer_age, visible_product,
 )
 from . import checkout_session
+from .operations import Operation, OperationKey
 from .db import ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, contribution_quantity, set_contribution
 from .live_sync import AccessEnded, notify_changed, viewer_role
 
@@ -92,7 +93,7 @@ class ListChanges(BaseModel):
 
 
 class MoveToCart(BaseModel):
-    # "personal" moves into the caller's personal cart; anything else is a household cart ID.
+    # A household cart ID.
     target: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     item_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=100)]] = Field(
         min_length=1, max_length=200
@@ -199,7 +200,7 @@ def load_items(
 def require_list(db: DatabaseConnection, household_id: str, list_id: str):
     row = db.execute(
         f"""SELECT {LIST_COLUMNS} FROM shopping_lists AS lists
-            LEFT JOIN household_member_profiles AS creator
+            LEFT JOIN household_members AS creator
               ON creator.household_id = lists.household_id AND creator.user_id = lists.created_by
             WHERE lists.household_id = ? AND lists.id = ? AND lists.archived_at IS NULL""",
         (household_id, list_id),
@@ -242,7 +243,7 @@ def get_lists(household_id: str, request: Request, caller: Caller) -> list[ListS
     with household_access(request, household_id, caller) as (db, is_primary):
         rows = db.execute(
             f"""SELECT {LIST_COLUMNS} FROM shopping_lists AS lists
-                LEFT JOIN household_member_profiles AS creator
+                LEFT JOIN household_members AS creator
                   ON creator.household_id = lists.household_id AND creator.user_id = lists.created_by
                 WHERE lists.household_id = ? AND lists.archived_at IS NULL
                 ORDER BY lists.updated_at DESC, lists.id""",
@@ -487,39 +488,17 @@ def clear_checked(household_id: str, list_id: str, request: Request, caller: Cal
 # ---------------------------------------------------------------------------
 # Move to cart
 # ---------------------------------------------------------------------------
-def add_to_personal_cart(db: DatabaseConnection, user_id: str, sku: str, quantity: int, now: str) -> None:
-    cart = db.execute("SELECT id FROM personal_carts WHERE user_id = ?", (user_id,)).fetchone()
-    if cart is None:
-        cart_id = str(uuid4())
-        db.execute(
-            "INSERT INTO personal_carts (id, user_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (cart_id, user_id, now, now),
-        )
-    else:
-        cart_id = cart["id"]
-    current = db.execute(
-        "SELECT quantity FROM personal_cart_items WHERE cart_id = ? AND sku = ?", (cart_id, sku)
-    ).fetchone()
-    total = min(MAX_QUANTITY, (current["quantity"] if current else 0) + quantity)
-    db.execute(
-        """INSERT INTO personal_cart_items (cart_id, sku, quantity, updated_at) VALUES (?, ?, ?, ?)
-           ON CONFLICT (cart_id, sku) DO UPDATE SET quantity = excluded.quantity, updated_at = excluded.updated_at""",
-        (cart_id, sku, total, now),
-    )
-    db.execute("UPDATE personal_carts SET updated_at = ? WHERE id = ?", (now, cart_id))
-
-
 def add_rows_to_cart(
-    db: DatabaseConnection, request: Request, household_id: str, cart: CartResponse | None, caller: Identity,
+    db: DatabaseConnection, request: Request, household_id: str, cart: CartResponse, caller: Identity,
     item_ids: list[str], now: str, *, find: str, list_id: str,
 ) -> MoveResult:
-    """Put the chosen list items in a cart. ``cart`` is None for the caller's personal cart.
+    """Put the chosen list items in a cart.
 
     Items that are not allowed are skipped with a reason instead of failing the rest.
     """
     moved: list[str] = []
     skipped: list[SkippedItem] = []
-    session = checkout_session.current_session(db, household_id, cart.id) if cart is not None else None
+    session = checkout_session.current_session(db, household_id, cart.id)
     for item_id in dict.fromkeys(item_ids):
         row = db.execute(find, (list_id, item_id)).fetchone()
         if row is None or not item_visible(request, caller, row["sku"]):
@@ -529,41 +508,42 @@ def add_rows_to_cart(
             skipped.append(SkippedItem(id=item_id, reason="Not a catalogue product"))
             continue
         try:
-            if cart is None:
-                visible_product(request, row["sku"], caller)
-                add_to_personal_cart(db, caller.user_id, row["sku"], row["quantity"], now)
+            require_product_for_cart(request, row["sku"], caller, cart)
+            if session is not None:
+                in_cart = shared_quantity(db, cart.id, row["sku"])
+                change_waiting(
+                    db, household_id, cart.id, row["sku"], row["quantity"], caller, False, session, in_cart=in_cart,
+                )
             else:
-                require_product_for_cart(request, row["sku"], caller, cart)
-                if session is not None:
-                    in_cart = shared_quantity(db, cart.id, row["sku"])
-                    change_waiting(
-                        db, household_id, cart.id, row["sku"], row["quantity"], caller, False, session, in_cart=in_cart,
-                    )
-                else:
-                    current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
-                    set_contribution(
-                        db, household_id, cart.id, row["sku"], caller.user_id,
-                        min(MAX_QUANTITY, current + row["quantity"]),
-                    )
+                current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
+                set_contribution(
+                    db, household_id, cart.id, row["sku"], caller.user_id,
+                    min(MAX_QUANTITY, current + row["quantity"]),
+                )
         except HTTPException as error:
             skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
             continue
         moved.append(item_id)
     if moved and session is not None:
         checkout_session.record_waiting_change(db, household_id, cart.id, caller.user_id)
-    elif moved and cart is not None:
+    elif moved:
         record_cart_change(db, household_id, cart.id, caller.user_id)
     return MoveResult(moved=moved, skipped=skipped)
 
 
 @router.post(f"{LIST}/move-to-cart")
 def move_to_cart(
-    household_id: str, list_id: str, body: MoveToCart, request: Request, caller: Caller
+    household_id: str, list_id: str, body: MoveToCart, request: Request, caller: Caller, key: OperationKey = None,
 ) -> MoveResult:
     now = now_iso()
     with household_access(request, household_id, caller, write=True) as (db, is_primary):
+        operation = Operation(
+            db, household_id, caller.user_id, key, ("move", household_id, list_id, body.model_dump()),
+        )
+        if operation.previous:
+            return MoveResult(**operation.previous)
         require_list(db, household_id, list_id)
-        cart = None if body.target == "personal" else require_visible_cart(
+        cart = require_visible_cart(
             db, household_id, checkout_session.open_cart_id(db, body.target), caller, is_primary,
         )
         result = add_rows_to_cart(
@@ -578,7 +558,7 @@ def move_to_cart(
             )
         if result.moved:
             touch(db, household_id, list_id, now)
-        return result
+        return operation.save(result)
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ from backend.shared.database import DatabaseConnection, DatabaseTarget, database
 from backend.shared.demo_members import MEMBERS_BY_ID
 
 from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, transaction
+from .operations import forget_old
 
 logger = logging.getLogger(__name__)
 SYNC_ERRORS = (RedisError,) + database_error_types()
@@ -59,12 +60,11 @@ def sweep_interval() -> float:
 
 
 def household_revision(db: DatabaseConnection, household_id: str) -> int:
-    """The latest cart revision in a household (the numbering checkout quotes are checked against)."""
+    """The latest revision in a household. It only goes up, and covers items waiting for the next cart."""
     return db.execute(
-        """SELECT COALESCE(MAX(revisions.revision), 0) AS revision
-           FROM carts JOIN checkout_cart_revisions AS revisions
-             ON revisions.cart_id = carts.id AND revisions.kind = 'household'
-           WHERE carts.household_id = ?""",
+        """SELECT COALESCE(MAX(CASE WHEN live_revision > revision THEN live_revision ELSE revision END), 0)
+                  AS revision
+           FROM carts WHERE household_id = ?""",
         (household_id,),
     ).fetchone()["revision"]
 
@@ -120,12 +120,9 @@ def build_snapshots(
 
     for row in db.execute(
         f"""SELECT members.household_id, members.user_id, members.active,
-                   household.created_by AS owner_id, profiles.display_name, profiles.is_adult,
-                   profiles.age_status
+                   household.admin_id AS owner_id, members.display_name, members.is_adult, members.age_status
             FROM household_members AS members
-            JOIN household_profiles AS household ON household.household_id = members.household_id
-            LEFT JOIN household_member_profiles AS profiles
-              ON profiles.household_id = members.household_id AND profiles.user_id = members.user_id
+            JOIN households AS household ON household.id = members.household_id
             WHERE members.household_id IN ({marks})
             ORDER BY members.household_id, members.user_id""",
         household_ids,
@@ -134,6 +131,7 @@ def build_snapshots(
             "household_id": row["household_id"], "owner_id": row["owner_id"],
             "owner_name": "the household admin", "revision": None, "members": [],
             "carts": [], "changed_carts": {}, "actors": {}, "cart_actors": {}, "ordered": {}, "lists": [],
+            "operations": [],
             "addresses": [], "checkouts": {}, "waiting": {}, "member_requests": [],
         })
         fixture = MEMBERS_BY_ID.get(row["user_id"])
@@ -167,11 +165,8 @@ def build_snapshots(
     carts_by_id = {}
     for row in db.execute(
         f"""SELECT carts.household_id, carts.id, carts.name, carts.creator_id, carts.adults_only,
-                   deleted_carts.cart_id IS NOT NULL AS deleted, deleted_carts.next_cart_id,
-                   cart_creator_revocations.cart_id IS NOT NULL AS creator_revoked
+                   carts.deleted, carts.next_cart_id, carts.creator_revoked
             FROM carts
-            LEFT JOIN deleted_carts ON deleted_carts.cart_id = carts.id
-            LEFT JOIN cart_creator_revocations ON cart_creator_revocations.cart_id = carts.id
             WHERE carts.household_id IN ({marks}) ORDER BY carts.id""",
         present,
     ):
@@ -223,7 +218,7 @@ def build_snapshots(
         changed[household].update(cart_ids)
     if include_events:
         for row in db.execute(
-            f"""SELECT id, household_id, cart_id, actor_id, reason FROM cart_sync_events
+            f"""SELECT id, household_id, cart_id, actor_id, reason, request_id FROM cart_sync_events
                 WHERE household_id IN ({marks}) ORDER BY id""",
             present,
         ):
@@ -237,6 +232,9 @@ def build_snapshots(
             people = snapshot["cart_actors"].setdefault(row["cart_id"], [])
             if row["actor_id"] and row["actor_id"] not in people:
                 people.append(row["actor_id"])
+            if row["request_id"]:
+                # Each viewer is only told about their own.
+                snapshot["operations"].append([row["actor_id"], row["request_id"]])
             if row["reason"] == "order":
                 snapshot["ordered"][row["cart_id"]] = row["actor_id"]
             snapshot["revision"] = row["id"]
@@ -264,7 +262,7 @@ def build_snapshots(
         earliest = min((value for value in cutoffs.values() if value), default=None)
         query = f"""SELECT lists.household_id, {LIST_COLUMNS}, lists.archived_at IS NOT NULL AS archived
                     FROM shopping_lists AS lists
-                    LEFT JOIN household_member_profiles AS creator
+                    LEFT JOIN household_members AS creator
                       ON creator.household_id = lists.household_id AND creator.user_id = lists.created_by
                     WHERE lists.household_id IN ({marks})"""
         parameters: list = list(present)
@@ -475,8 +473,9 @@ class LiveSync:
         # whole batch has succeeded, so a failed batch is fully retried next time.
         swept_until = self._last_sweep_at
         try:
-            with transaction(self.db_path, write=True) as db:
+            with transaction(self.db_path, write=True, snapshot=True) as db:
                 if sweep_due:
+                    forget_old(db)
                     dirty |= self._sweep(db)
                 if dirty:
                     households = sorted(dirty)

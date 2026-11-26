@@ -5,13 +5,6 @@ CREATE TABLE IF NOT EXISTS store_inventory (
     PRIMARY KEY (store_id, sku)
 );
 
-CREATE TABLE IF NOT EXISTS checkout_cart_revisions (
-    kind TEXT NOT NULL CHECK (kind IN ('personal', 'household')),
-    cart_id TEXT NOT NULL,
-    revision BIGINT NOT NULL,
-    PRIMARY KEY (kind, cart_id)
-);
-
 CREATE TABLE IF NOT EXISTS checkout_quotes (
     id TEXT PRIMARY KEY,
     purchaser_id TEXT NOT NULL,
@@ -98,3 +91,17 @@ CREATE TABLE IF NOT EXISTS member_requests (
 );
 
 CREATE INDEX IF NOT EXISTS member_requests_household_idx ON member_requests (household_id, created_at);
+
+-- One row per accepted cart change, saved with the change itself. A retry finds its result here.
+CREATE TABLE IF NOT EXISTS cart_operations (
+    user_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    household_id TEXT NOT NULL REFERENCES households(id),
+    fingerprint TEXT NOT NULL,
+    result TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS cart_operations_recent_idx ON cart_operations (user_id, household_id, created_at);
+CREATE INDEX IF NOT EXISTS cart_operations_created_idx ON cart_operations (created_at);

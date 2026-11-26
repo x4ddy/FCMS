@@ -99,22 +99,6 @@ class HouseholdAccountTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"{root}/addresses/{address_id}", headers=primary).status_code, 204)
         self.assertEqual(len(self.client.get(f"{root}/addresses", headers=member).json()), 1)
 
-    def test_personal_carts_are_isolated_per_user(self) -> None:
-        first = self.headers("personal-one")
-        second = self.headers("personal-two")
-        item = "/api/v1/personal-cart/items/milk"
-        self.assertEqual(self.client.get("/api/v1/personal-cart", headers=first).json(), {"items": []})
-        self.assertEqual(self.client.patch(item, headers=first, json={"delta": 1}).json()["quantity"], 1)
-        self.assertEqual(self.client.patch(item, headers=first, json={"delta": 1}).json()["quantity"], 2)
-        self.assertEqual(self.client.get("/api/v1/personal-cart", headers=second).json(), {"items": []})
-        self.assertEqual(
-            self.client.get("/api/v1/personal-cart", headers=first).json(),
-            {"items": [{"sku": "milk", "quantity": 2}]},
-        )
-        self.assertEqual(self.client.patch(item, headers=first, json={"delta": -1}).json()["quantity"], 1)
-        self.assertEqual(self.client.patch(item, headers=first, json={"delta": -1}).json()["quantity"], 0)
-        self.assertEqual(self.client.get("/api/v1/personal-cart", headers=first).json(), {"items": []})
-
     def test_primary_can_create_multiple_households_and_multiple_carts(self) -> None:
         primary = self.headers("multi-primary")
         first = self.client.post("/api/v1/households", headers=primary, json={
@@ -138,32 +122,11 @@ class HouseholdAccountTests(unittest.TestCase):
         self.assertEqual(party.status_code, 201, party.text)
         self.assertEqual(len(self.client.get(f"{root}/carts", headers=primary).json()), 3)
 
-    def test_user_can_store_multiple_private_addresses(self) -> None:
-        user = self.headers("address-owner")
-        other = self.headers("address-other")
-        base = {
-            "recipient_name": "Address Owner", "address_line2": "", "postal_code": "110001",
-            "phone": "9876543210",
-        }
-        home = self.client.post("/api/v1/addresses", headers=user, json={
-            **base, "label": "Home", "address_line1": "12 Market Road", "city": "Delhi",
-        })
-        office = self.client.post("/api/v1/addresses", headers=user, json={
-            **base, "label": "Office", "address_line1": "50 Business Park", "city": "Gurugram",
-        })
-        self.assertEqual(home.status_code, 201, home.text)
-        self.assertEqual(office.status_code, 201, office.text)
-        self.assertEqual(len(self.client.get("/api/v1/addresses", headers=user).json()), 2)
-        self.assertEqual(self.client.get("/api/v1/addresses", headers=other).json(), [])
-        self.assertEqual(
-            self.client.delete(f"/api/v1/addresses/{home.json()['id']}", headers=other).status_code,
-            404,
-        )
-        self.assertEqual(
-            self.client.delete(f"/api/v1/addresses/{home.json()['id']}", headers=user).status_code,
-            204,
-        )
-        self.assertEqual(len(self.client.get("/api/v1/addresses", headers=user).json()), 1)
+    def test_the_unused_personal_cart_and_address_routes_are_gone(self) -> None:
+        user = self.headers("route-check")
+        for method, path in (("GET", "/api/v1/personal-cart"), ("PATCH", "/api/v1/personal-cart/items/milk"),
+                             ("GET", "/api/v1/addresses"), ("POST", "/api/v1/addresses")):
+            self.assertEqual(self.client.request(method, path, headers=user, json={}).status_code, 404, path)
 
     def test_household_transfer_moves_all_primary_cart_controls(self) -> None:
         primary = self.headers("transfer-primary")

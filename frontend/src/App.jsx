@@ -2,14 +2,16 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { AddressBook } from './AddressBook.jsx'
 import {
-  accountApi, connectCarts, householdApi, logoutSession, onAccessTokenChanged, refreshAccessToken, restoreSession,
+  accountApi, connectCarts, currentAccessToken, householdApi, logoutSession, onAccessTokenChanged, refreshAccessToken, restoreSession,
 } from './api.js'
 import { DateOfBirthForm, GoogleAuthModal } from './Auth.jsx'
 import { CartView } from './CartDrawer.jsx'
-import { applyAdjustment, cartActivity, cartDifferences, cartQuantities, cartRows, combined, withTaps } from './cartState.js'
+import { openCartQueue, SETTINGS, withTimeout } from './cartQueue.js'
+import { applyConfirmed, cartActivity, cartDifferences, cartQuantities, cartRows, combined, withOperations, withTaps } from './cartState.js'
 import { Checkout, OrderConfirmation } from './Checkout.jsx'
 import { isUnconfirmed, readAttempt, saveAttempt } from './checkoutState.js'
 import { AddressesPage, HouseholdPage } from './Household.jsx'
+import { openStore } from './operationStore.js'
 import { OrderHistory } from './OrderHistory.jsx'
 import { Landing, ShopPage } from './Shop.jsx'
 import { ListsPage } from './ShoppingLists.jsx'
@@ -58,9 +60,10 @@ function App() {
   const [picked, setSelected] = useState(() => new Set())
   // "Select all" also covers items that arrive afterwards, until something is unticked.
   const [allSelected, setAllSelected] = useState(false)
-  // sku -> change. Taps wait a moment and are sent together; sending holds those on their way.
-  const [taps, setTaps] = useState({})
-  const [sending, setSending] = useState({})
+  // This person's cart changes that the server has not confirmed yet, in every household.
+  const [operations, setOperations] = useState([])
+  // A checked-out cart -> the cart that took its place, for changes made before it did.
+  const [successors, setSuccessors] = useState({})
   const [live, setLive] = useState(false)
   const [drawer, setDrawer] = useState(null)
   const [query, setQuery] = useState('')
@@ -88,9 +91,10 @@ function App() {
   drawerRef.current = drawer
   const cartIdRef = useRef(null)
   cartIdRef.current = cartId
-  // sku -> { cartId, product, delta, timer }
-  const waiting = useRef(new Map())
-  const requests = useRef(Promise.resolve())
+  const queue = useRef(null)
+  const queueEvents = useRef({})
+  // Keys from updates that were too old to show. The next one shown contains them too.
+  const alreadyApplied = useRef(new Set())
   // Live updates older than our own last saved edit are ignored.
   const editRevision = useRef(0)
   const token = session?.access_token
@@ -116,14 +120,17 @@ function App() {
   }, [])
 
   function forgetCart() {
-    for (const entry of waiting.current.values()) window.clearTimeout(entry.timer)
-    waiting.current.clear()
     editRevision.current = 0
-    setTaps({}); setSending({}); setCart(null); setGrants([]); setSelected(new Set()); setAllSelected(false)
+    alreadyApplied.current.clear()
+    setCart(null); setGrants([]); setSelected(new Set()); setAllSelected(false)
   }
 
   function clearSession() {
     currentUser.current = null
+    // What is unconfirmed stays stored on this device for this person's next sign-in.
+    queue.current?.stop()
+    queue.current = null
+    setOperations([]); setSuccessors({})
     forgetCart()
     setSession(null); setHousehold(null); setHouseholds([]); setCarts([]); setProducts([]); setMembers([])
     setAddresses([]); setInvitation(null); setCartId(null); setCheckoutCart(null); setPendingOrder(null); setMemberRequests([])
@@ -134,10 +141,13 @@ function App() {
   useEffect(() => onAccessTokenChanged((nextToken, refreshedUser) => {
     if (!nextToken) clearSession()
     else if (refreshedUser && currentUser.current && refreshedUser.id !== currentUser.current) clearSession()
-    else setSession((current) => current && {
-      ...current, access_token: nextToken,
-      user: refreshedUser ? { ...current.user, is_adult: refreshedUser.is_adult } : current.user,
-    })
+    else {
+      queue.current?.signedIn()
+      setSession((current) => current && {
+        ...current, access_token: nextToken,
+        user: refreshedUser ? { ...current.user, is_adult: refreshedUser.is_adult } : current.user,
+      })
+    }
   }), [])
 
   async function loadHousehold(chosen, accessToken = token) {
@@ -154,11 +164,37 @@ function App() {
       chosen.role === 'primary' ? selectedApi.members() : [], selectedApi.memberRequests(),
     ])
     const initial = visibleCarts.find((item) => !item.adults_only) ?? visibleCarts[0]
-    const initialCart = initial ? await selectedApi.cart(initial.id) : null
+    const initialCart = initial ? await selectedApi.cart(initial.id, queue.current?.keys(chosen.id)) : null
     forgetCart()
     setProducts(visibleProducts); setHousehold(chosen); setCarts(visibleCarts); setMembers(visibleMembers)
-    setAddresses(savedAddresses); setMemberRequests(requests); setInvitation(null); setCartId(initial?.id ?? null); setCart(initialCart)
+    setAddresses(savedAddresses); setMemberRequests(requests); setInvitation(null); setCartId(initial?.id ?? null)
+    if (initialCart) showCart(initialCart)
     setSession((current) => current && { ...current, ...capabilities })
+  }
+
+  async function startQueue(user) {
+    queue.current?.stop()
+    const request = (operation, action) => withTimeout((signal) => action(
+      householdApi(currentAccessToken(), operation.householdId), { signal, owner: user },
+    ), SETTINGS.timeout)
+    const opened = await openCartQueue({
+      userId: user,
+      send: (operation) => request(operation, (target, options) => {
+        const keyed = { ...options, idempotencyKey: operation.requestId }
+        return operation.kind === 'remove' ? target.removeSharedItem(operation.cartId, operation.sku, keyed)
+          : target.adjustSharedQuantity(operation.cartId, operation.sku, operation.delta, keyed)
+      }),
+      createCart: (operation) => request(operation, (target, options) => target.create('Shared shopping cart', false, {
+        ...options, idempotencyKey: operation.createKey,
+      })),
+      onChange: (list) => { if (currentUser.current === user) setOperations(list) },
+      onResolved: (operation, result) => queueEvents.current.resolved(operation, result),
+      onFailed: (operation, error) => queueEvents.current.failed(operation, error),
+      onCart: (operation, created) => queueEvents.current.cart(operation, created),
+    }, openStore)
+    if (currentUser.current !== user) { opened.stop(); return }
+    queue.current = opened
+    setOperations(opened.operations())
   }
 
   async function hydrateSession(signedIn) {
@@ -173,6 +209,8 @@ function App() {
     setSession(signedIn)
     setHouseholds(visibleHouseholds)
     setPendingOrder(readAttempt(signedIn.user.id))
+    // Before the first cart, so what it already contains is not counted again.
+    await startQueue(signedIn.user.id)
     await loadHousehold(visibleHouseholds[0] ?? null, signedIn.access_token)
   }
 
@@ -198,12 +236,12 @@ function App() {
     let waitingBefore = 0
     let cartsBefore = null
     function connect() {
-      editRevision.current = 0  // the first message is read fresh from the database
-      socket = connectCarts(token, householdId, cartId)
+      socket = connectCarts(token, householdId, cartId, () => queue.current?.keys(householdId) ?? [])
       socket.onmessage = (event) => {
         if (stopped) return
         const snapshot = JSON.parse(event.data)
         setLive(true)
+        queue.current?.wake()  // the server can be reached
         setCarts(snapshot.carts)
         if (snapshot.household_role) {
           setHousehold((current) => current && { ...current, role: snapshot.household_role })
@@ -238,7 +276,7 @@ function App() {
           // Checked out. What was added meanwhile is in the new cart that replaced it.
           const buyer = snapshot.members?.find((member) => member.id === snapshot.ordered_by)?.display_name
           if (snapshot.ordered_by !== userId) showPopup(`${buyer ?? 'The cart'} ${buyer ? 'placed an order' : 'was checked out'}. New items are in the next cart.`, 'activity')
-          selectCart(snapshot.next_cart_id)
+          followCart(cartId, snapshot.next_cart_id)
         } else if (snapshot.cart === null && cartId) {
           previous = null
           forgetCart()
@@ -247,7 +285,10 @@ function App() {
           if (drawerRef.current === 'checkout') setDrawer('cart')
           if (snapshot.access_notice) showPopup(snapshot.access_notice, 'error')
         } else if (snapshot.cart) {
-          if (snapshot.revision < editRevision.current) return
+          if (snapshot.revision < editRevision.current) {
+            for (const key of snapshot.applied ?? []) alreadyApplied.current.add(key)
+            return
+          }
           if (previous !== null) {
             const memberNames = new Map((snapshot.members ?? []).map((member) => [member.id, member.display_name]))
             for (const message of cartActivity(previous, combined(snapshot.cart), userId, snapshot.actor_id,
@@ -261,7 +302,7 @@ function App() {
           }
           waitingBefore = snapshot.cart.waiting?.length ?? 0
           previous = combined(snapshot.cart)
-          setCart(snapshot.cart)
+          showCart({ ...snapshot.cart, revision: snapshot.revision, applied: snapshot.applied })
           if (snapshot.grants) setGrants(snapshot.grants)
         }
         cartsBefore = new Set(snapshot.carts.map((item) => item.id))
@@ -451,21 +492,69 @@ function App() {
     } finally { setBusy(false) }
   }
 
+  /**
+   * Show saved contents. The changes they already include stop being added on top in the same
+   * moment, so nothing is counted twice. Contents older than what is shown are ignored.
+   */
+  function showCart(fresh) {
+    if (fresh.revision < editRevision.current) {
+      for (const key of fresh.applied ?? []) alreadyApplied.current.add(key)
+      return false
+    }
+    editRevision.current = fresh.revision
+    setCart(fresh)
+    queue.current?.markApplied([...fresh.applied ?? [], ...alreadyApplied.current])
+    alreadyApplied.current.clear()
+    return true
+  }
+
+  queueEvents.current = {
+    resolved(operation, update) {
+      if (operation.householdId !== householdId) return
+      if (update.cart_id !== operation.cartId) setSuccessors((current) => ({ ...current, [operation.cartId]: update.cart_id }))
+      if (update.cart_id !== cartIdRef.current) return
+      editRevision.current = Math.max(editRevision.current, update.revision)
+      setCart((shown) => applyConfirmed(shown, update))
+      // A checkout may have started or ended since the last update.
+      if (cart && Boolean(cart.checkout) !== update.waiting) reloadCart(update.cart_id)
+    },
+    failed(operation, error) {
+      showPopup(error.message, 'error')
+      if (operation.householdId === householdId && cartIdRef.current) reloadCart(cartIdRef.current)
+    },
+    cart(operation, created) {
+      if (operation.householdId !== householdId) return
+      if (!cartIdRef.current) {
+        cartIdRef.current = created.id
+        setCartId(created.id)
+        setCart({ ...created, contributions: [], waiting: [], revision: 0 })
+      }
+      api.carts().then(setCarts).catch(() => { /* the next live update lists it */ })
+    },
+  }
+
+  /** Go on with the cart that replaced a checked-out one, including what is still unconfirmed. */
+  function followCart(old, next) {
+    setSuccessors((current) => ({ ...current, [old]: next }))
+    selectCart(next)
+  }
+
   /** Put the screen in line with what is saved. The next live update also does this. */
   async function reloadCart(id) {
     try {
-      const fresh = await api.cart(id)
-      if (cartIdRef.current === id && fresh.id === id) setCart(fresh)
-      return fresh
+      const fresh = await api.cart(id, queue.current?.keys(householdId))
+      if (cartIdRef.current !== id || fresh.id !== id || showCart(fresh)) return fresh
+      // Something newer was confirmed while this was on its way.
+      const again = await api.cart(id, queue.current?.keys(householdId))
+      if (cartIdRef.current === id) showCart(again)
+      return again
     } catch { /* the next live update will correct it */ }
   }
 
   function selectCart(id) {
     if (id === cartIdRef.current) return
-    flushTaps()
+    queue.current?.seal()
     setCart(null); setGrants([]); setSelected(new Set()); setAllSelected(false)
-    setTaps({}); setSending({})
-    editRevision.current = 0
     setCartId(id)
     cartIdRef.current = id
     reloadCart(id)
@@ -474,87 +563,40 @@ function App() {
   // While somebody checks out, the cart stands still and changes go to the items waiting for the next one.
   const locked = Boolean(cart?.checkout)
   const changing = locked ? cart.waiting : cart?.contributions
-  const changingTotals = useMemo(() => withTaps(cartQuantities(changing), sending, taps), [changing, sending, taps])
-  const own = useMemo(() => withTaps(cartQuantities(changing?.filter((row) => row.contributor_id === userId)), sending, taps),
-    [changing, sending, taps, userId])
+  const unconfirmed = useMemo(() => operations.filter(unconfirmedHere), [operations, successors, householdId, cartId])
+  const unresolved = useMemo(() => new Set(unconfirmed.map((item) => item.sku)), [unconfirmed])
+  const changingTotals = useMemo(() => withOperations(cartQuantities(changing), unconfirmed), [changing, unconfirmed])
+  const own = useMemo(() => withOperations(cartQuantities(changing?.filter((row) => row.contributor_id === userId)), unconfirmed),
+    [changing, unconfirmed, userId])
   const inCart = useMemo(() => locked ? cartQuantities(cart.contributions) : changingTotals, [locked, cart, changingTotals])
   const quantities = useMemo(() => locked ? withTaps(inCart, changingTotals) : inCart, [locked, inCart, changingTotals])
-  const rows = useMemo(() => cartRows(cart?.contributions ?? [], inCart, products), [cart, inCart, products])
-  const waitingRows = useMemo(() => locked ? cartRows(cart.waiting, changingTotals, products) : [], [locked, cart, changingTotals, products])
+  const rows = useMemo(() => cartRows(cart?.contributions ?? [], inCart, products, locked ? undefined : unresolved),
+    [cart, inCart, products, locked, unresolved])
+  const waitingRows = useMemo(() => locked ? cartRows(cart.waiting, changingTotals, products, unresolved) : [],
+    [locked, cart, changingTotals, products, unresolved])
   const bySku = useMemo(() => new Map(products.map((product) => [product.sku, product])), [products])
   const names = useMemo(() => new Map([...members.map((member) => [member.id, member.display_name]), [userId, session?.user.display_name]]),
     [members, userId, session?.user.display_name])
 
-  const addTo = (change, sku, delta) => {
-    const next = { ...change, [sku]: (change[sku] ?? 0) + delta }
-    if (next[sku] === 0) delete next[sku]
-    return next
-  }
-
-  /** Show a tap at once; send all taps on the same product as one request after a short pause. */
+  /** Show a tap at once. The queue saves it, sends it and keeps it until the server confirms it. */
   const adjustState = useRef(null)
   const adjust = useCallback((product, delta) => adjustState.current(product, delta), [])
-  adjustState.current = (product, delta) => {
-    const { sku } = product
-    const entry = waiting.current.get(sku) ?? { cartId, product, delta: 0 }
-    const limited = Math.max(-99, Math.min(99, entry.delta + delta))
-    const applied = limited - entry.delta
-    if (!applied || (changingTotals[sku] ?? 0) + applied < 0) return
-    entry.delta = limited
-    setTaps((current) => addTo(current, sku, applied))
-    window.clearTimeout(entry.timer)
-    entry.timer = window.setTimeout(() => flushTaps(sku), 400)
-    waiting.current.set(sku, entry)
+  adjustState.current = ({ sku }, delta) => {
+    if ((queue.current ? shownQuantity(sku) : 0) + delta < 0) return
+    queue.current?.adjust({ householdId, cartId, sku, delta })
   }
 
-  /** Send waiting taps now. Resolves when everything sent so far is saved. */
-  function flushTaps(only) {
-    for (const [sku, entry] of [...waiting.current]) {
-      if (only && sku !== only) continue
-      window.clearTimeout(entry.timer)
-      waiting.current.delete(sku)
-      if (entry.delta === 0) continue
-      setTaps((current) => { const next = { ...current }; delete next[sku]; return next })
-      setSending((current) => addTo(current, sku, entry.delta))
-      // One after another, so two changes to the same product cannot overtake each other.
-      requests.current = requests.current.then(() => sendTap(sku, entry))
-    }
-    return requests.current
+  /** Also right between two taps, before React has drawn the first one. */
+  function shownQuantity(sku) {
+    const latest = queue.current.operations().filter((item) => item.sku === sku && unconfirmedHere(item))
+    return withOperations(cartQuantities(changing), latest)[sku] ?? 0
   }
 
-  async function sendTap(sku, { cartId: target, delta }) {
-    let current = target
-    const followed = () => cartIdRef.current === current
-    try {
-      if (!current) {
-        const created = await api.create('Shared shopping cart', false)
-        current = created.id
-        cartIdRef.current = created.id
-        setCarts(await api.carts())
-        setCartId(created.id)
-        setCart({ ...created, contributions: created.contributions ?? [] })
-      }
-      const update = await api.adjustSharedQuantity(current, sku, delta)
-      if (!followed()) return
-      editRevision.current = Math.max(editRevision.current, update.revision ?? 0)
-      let matches = true
-      setCart((shown) => {
-        if (!shown) return shown
-        const part = update.waiting ? 'waiting' : 'contributions'
-        const next = { ...shown, [part]: applyAdjustment(shown[part] ?? [], sku, delta, currentUser.current) }
-        // A checkout may have started or ended since the last update.
-        matches = (cartQuantities(combined(next))[sku] ?? 0) === update.quantity && Boolean(shown.checkout) === update.waiting
-        return next
-      })
-      setSending((change) => sku in change ? addTo(change, sku, -delta) : change)
-      // Someone else changed the same product meanwhile.
-      window.setTimeout(() => { if (!matches && followed()) reloadCart(current) }, 0)
-    } catch (error) {
-      if (followed()) setSending((change) => sku in change ? addTo(change, sku, -delta) : change)
-      if (error.status === 401) { clearSession(); return }
-      showPopup(error.message, 'error')
-      if (followed() && current) reloadCart(current)
-    }
+  function unconfirmedHere(item) {
+    if (item.householdId !== householdId) return false
+    let id = item.cartId
+    for (let steps = 0; successors[id] && steps < 20; steps += 1) id = successors[id]
+    return !id || id === cartId
   }
 
   async function removeItem(row) {
@@ -563,18 +605,7 @@ function App() {
       text: row.people.some((item) => item.contributor_id !== userId) ? 'Other members added this too. It is removed for everyone.' : undefined,
       action: 'Remove', danger: true,
     })) return
-    const id = cartId
-    await flushTaps()
-    const part = locked ? 'waiting' : 'contributions'
-    setCart((shown) => shown && { ...shown, [part]: shown[part].filter((item) => item.sku !== row.sku) })
-    try {
-      const update = await api.removeSharedItem(id, row.sku)
-      if (cartIdRef.current === id) editRevision.current = Math.max(editRevision.current, update.revision ?? 0)
-    } catch (error) {
-      if (error.status === 401) { clearSession(); return }
-      showPopup(error.message, 'error')
-      reloadCart(id)
-    }
+    queue.current?.remove({ householdId, cartId, sku: row.sku })
   }
 
   function updatePin(id, pin) {
@@ -606,11 +637,17 @@ function App() {
     if (isPrimary) setMembers(await api.members())
   }
 
+  async function saveChanges(filter, advice) {
+    if (!queue.current || await queue.current.flush(filter, 10000)) return
+    throw new Error(`Some cart changes could not be saved yet. ${advice}`)
+  }
+
   /** Leave or delete the household being used, then continue with another one if there is one. */
-  function endMembership(request, message) {
+  function endMembership(request, message, keepChanges) {
     return run(async () => {
-      await flushTaps()
+      if (keepChanges) await saveChanges((item) => item.householdId === householdId, 'Try leaving again in a moment.')
       await request()
+      queue.current?.discard((item) => item.householdId === householdId)
       leavingRef.current = householdId  // the live connection will report that access ended
       const remaining = await account.households()
       setHouseholds(remaining)
@@ -628,7 +665,8 @@ function App() {
   /** Save what is waiting, bring the cart up to date, and only then open checkout. */
   async function startCheckout() {
     await run(async () => {
-      await flushTaps()
+      // Nobody should pay for a cart that is not what they see.
+      await saveChanges(unconfirmedHere, 'Try checkout again in a moment.')
       const id = cartIdRef.current
       const everything = available.every((row) => selected.has(row.sku))
       const fresh = await api.startCheckout(id)
@@ -637,7 +675,7 @@ function App() {
       const listed = new Set(fresh.contributions.map((row) => row.sku))
       const chosen = new Set([...(everything ? listed : selected)].filter((sku) => listed.has(sku) && bySku.has(sku)))
       setCheckoutChanges(cartDifferences(cart.contributions, fresh.contributions, productNames.current))
-      setCart(fresh)
+      showCart(fresh)
       setAllSelected(false)  // what is being ordered no longer changes
       setSelected(chosen)
       if (chosen.size === 0) {
@@ -655,9 +693,7 @@ function App() {
     if (!session) return
     checkoutSession.current = null
     session.api.leaveCheckout(session.cartId).then(() => {
-      if (cartIdRef.current === session.cartId) return session.api.cart(session.cartId)
-    }).then((fresh) => {
-      if (fresh && cartIdRef.current === fresh.id) setCart(fresh)
+      if (cartIdRef.current === session.cartId) return reloadCart(session.cartId)
     }).catch(() => { /* it runs out by itself within a few minutes */ })
   }
 
@@ -681,7 +717,7 @@ function App() {
   const checkoutBy = !cart?.checkout ? null : cart.checkout.user_id === userId ? 'You' : names.get(cart.checkout.user_id) ?? 'Another member'
   const shop = {
     quantities, cartId, needsHousehold: !household, adultsOnly: Boolean(cart?.adults_only),
-    canEdit: cart ? cart.can_edit_items !== false : isPrimary && carts.length === 0, canRemove: removable, onAdjust: adjust,
+    canEdit: cart ? cart.can_edit_items !== false : isPrimary && carts.length === 0, canRemove: removable, onAdjust: adjust, unresolved,
   }
   const page = showOrderHistory || orderId ? 'orders' : view
   const ready = session && !needsAgeSetup && !restoringSession
@@ -720,7 +756,7 @@ function App() {
               {(isPrimary || isAdult) && <button onClick={() => openPage('orders')}>Order history</button>}
               <button onClick={() => openPage('household')}>{household ? 'Household' : 'Create or join a household'}</button></>}
             <button disabled={busy} onClick={() => run(async () => {
-              await flushTaps()
+              await queue.current?.seal()
               await logoutSession(token)
               clearSession()
             })}>Sign out</button>
@@ -771,7 +807,7 @@ function App() {
         view === 'household' ? <HouseholdPage household={household} households={households} session={session} carts={carts} members={members}
           addresses={addresses} account={account} busy={busy} invitation={invitation} onNotify={showPopup}
           roleName={roleName} memberRequests={memberRequests}
-          onLeave={() => endMembership(() => api.leave(), `You left ${household.name}.`)}
+          onLeave={() => endMembership(() => api.leave(), `You left ${household.name}.`, true)}
           onDelete={() => endMembership(() => api.deleteHousehold(), `${household.name} was deleted.`)}
           onRequestMember={(name, note) => run(async () => {
             const created = await api.requestMember(name, note)
@@ -803,7 +839,7 @@ function App() {
             return joined
           })}
           onSelectHousehold={(id) => run(async () => {
-            await flushTaps()
+            queue.current?.seal()
             await loadHousehold(households.find((item) => item.id === id))
           })}
           onInvite={() => run(async () => setInvitation(await api.createInvitation()))}
@@ -846,7 +882,7 @@ function App() {
             names={names} products={bySku} addresses={checkoutAddresses}
             editor={api && <AddressBook {...addressBook} buttonLabel="Save address" />} /> :
           <CartView carts={carts} cart={cart} cartId={cartId} rows={rows} user={session.user} household={household} members={members} names={names}
-            grants={grants} selected={selected} busy={busy} live={live} saving={Object.keys(taps).length + Object.keys(sending).length > 0}
+            grants={grants} selected={selected} busy={busy} live={live} unresolved={unresolved}
             canAdultsOnly={session.can_create_adults_only_cart} waitingRows={waitingRows} checkoutBy={checkoutBy}
             mine={cart?.checkout?.user_id === userId} canRemove={removable} onEndCheckout={() => run(async () => {
               await api.leaveCheckout(cartId)
@@ -871,8 +907,8 @@ function App() {
             })}
             onDeleteCart={() => run(async () => {
               const { name } = cart
-              await flushTaps()
               await api.deleteCart(cartId)
+              queue.current?.discard(unconfirmedHere)
               const remaining = await api.carts()
               forgetCart()
               setCartId(null)

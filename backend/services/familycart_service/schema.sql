@@ -1,12 +1,20 @@
 CREATE TABLE IF NOT EXISTS households (
-    id TEXT NOT NULL PRIMARY KEY
+    id TEXT NOT NULL PRIMARY KEY,
+    name TEXT NOT NULL,
+    -- The admin. Changes when ownership is handed over.
+    admin_id TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS household_members (
     household_id TEXT NOT NULL REFERENCES households(id),
     user_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('primary', 'member')),
     active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+    display_name TEXT NOT NULL,
+    -- 1 once this household's admin approved them as 18 or over.
+    is_adult INTEGER NOT NULL DEFAULT 0 CHECK (is_adult IN (0, 1)),
+    -- NONE: said under 18. Others: said 18 or over; the admin decides.
+    age_status TEXT NOT NULL DEFAULT 'APPROVED' CHECK (age_status IN ('NONE', 'PENDING', 'APPROVED', 'REJECTED')),
     PRIMARY KEY (household_id, user_id)
 );
 
@@ -16,27 +24,16 @@ CREATE TABLE IF NOT EXISTS carts (
     creator_id TEXT NOT NULL,
     name TEXT NOT NULL,
     adults_only INTEGER NOT NULL CHECK (adults_only IN (0, 1)),
+    -- Deleted, or checked out and replaced by next_cart_id. Kept for old records.
+    deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+    next_cart_id TEXT,
+    -- The admin took the creator's access away.
+    creator_revoked INTEGER NOT NULL DEFAULT 0 CHECK (creator_revoked IN (0, 1)),
+    -- What checkout reviews are compared with, and the latest change including waiting items.
+    revision BIGINT NOT NULL DEFAULT 0,
+    live_revision BIGINT NOT NULL DEFAULT 0,
     UNIQUE (household_id, id),
     FOREIGN KEY (household_id, creator_id)
-        REFERENCES household_members (household_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS household_profiles (
-    household_id TEXT PRIMARY KEY REFERENCES households(id),
-    name TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS household_member_profiles (
-    household_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    is_adult INTEGER NOT NULL CHECK (is_adult IN (0, 1)),
-    -- NONE: said under 18. Others: said 18 or over; the primary decides. is_adult is 1 only once approved.
-    age_status TEXT NOT NULL DEFAULT 'APPROVED' CHECK (age_status IN ('NONE', 'PENDING', 'APPROVED', 'REJECTED')),
-    PRIMARY KEY (household_id, user_id),
-    FOREIGN KEY (household_id, user_id)
         REFERENCES household_members (household_id, user_id)
 );
 
@@ -79,39 +76,6 @@ CREATE TABLE IF NOT EXISTS household_addresses (
 CREATE INDEX IF NOT EXISTS household_addresses_household_idx
     ON household_addresses (household_id, created_at);
 
-CREATE TABLE IF NOT EXISTS user_addresses (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    label TEXT NOT NULL,
-    recipient_name TEXT NOT NULL,
-    address_line1 TEXT NOT NULL,
-    address_line2 TEXT,
-    city TEXT NOT NULL,
-    postal_code TEXT,
-    phone TEXT,
-    latitude REAL,
-    longitude REAL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS user_addresses_user_idx ON user_addresses (user_id, created_at);
-
-CREATE TABLE IF NOT EXISTS personal_carts (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS personal_cart_items (
-    cart_id TEXT NOT NULL REFERENCES personal_carts(id) ON DELETE CASCADE,
-    sku TEXT NOT NULL,
-    quantity INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity > 0),
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (cart_id, sku)
-);
-
 CREATE INDEX IF NOT EXISTS carts_household_idx ON carts (household_id);
 
 CREATE TABLE IF NOT EXISTS cart_grants (
@@ -121,14 +85,6 @@ CREATE TABLE IF NOT EXISTS cart_grants (
     PRIMARY KEY (cart_id, member_id),
     FOREIGN KEY (household_id, cart_id) REFERENCES carts (household_id, id),
     FOREIGN KEY (household_id, member_id) REFERENCES household_members (household_id, user_id)
-);
-
-CREATE TABLE IF NOT EXISTS cart_creator_revocations (
-    cart_id TEXT NOT NULL PRIMARY KEY REFERENCES carts (id)
-);
-
-CREATE TABLE IF NOT EXISTS deleted_carts (
-    cart_id TEXT NOT NULL PRIMARY KEY REFERENCES carts (id)
 );
 
 CREATE TABLE IF NOT EXISTS cart_item_contributions (
@@ -149,6 +105,7 @@ CREATE TABLE IF NOT EXISTS cart_sync_events (
     actor_id TEXT,
     -- 'order' when checkout emptied the cart, so members are not told items were removed.
     reason TEXT,
+    request_id TEXT,
     FOREIGN KEY (household_id, cart_id) REFERENCES carts (household_id, id)
 );
 

@@ -21,7 +21,6 @@ from backend.shared.tokens import Identity, issue_token, verify_token
 DUBAI = {"latitude": 25.2048, "longitude": 55.2708}
 AL_AIN = {"latitude": 24.2075, "longitude": 55.7447}
 ADDRESS = {"label": "Home", "recipient_name": "Customer", "address_line1": "Demo Building", "city": "Dubai"}
-PERSONAL = "/api/v1/addresses"
 HOUSEHOLD = "/api/v1/households/demo-household"
 SHARED = f"{HOUSEHOLD}/addresses"
 MAPS = "/api/v1/maps"
@@ -96,17 +95,12 @@ class SavedAddressTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db)) as db, db:
             db.executescript(schema.replace("    latitude REAL,\n    longitude REAL,\n", ""))
             db.executescript((SQL_DIR / "seed.sql").read_text(encoding="utf-8"))
-            db.execute("""INSERT INTO user_addresses (id, user_id, label, recipient_name, address_line1, city,
-                          created_at, updated_at) VALUES ('legacy', 'user-primary', 'Home', 'Customer',
-                          'Demo Building', 'Dubai', 'seed', 'seed')""")
             db.execute("""INSERT INTO household_addresses (id, household_id, label, recipient_name, address_line1,
                           city, created_by, created_at, updated_at) VALUES ('legacy-shared', 'demo-household', 'Home',
                           'Customer', 'Demo Building', 'Dubai', 'user-primary', 'seed', 'seed')""")
 
-        path = f"{PERSONAL}/legacy"
+        path = f"{SHARED}/legacy-shared"
         with TestClient(familycart_app) as cart:
-            personal = cart.get(PERSONAL, headers=self.owner).json()[0]
-            self.assertEqual((personal["latitude"], personal["longitude"]), (None, None))
             shared = cart.get(SHARED, headers=self.owner).json()[0]
             self.assertEqual((shared["latitude"], shared["longitude"]), (None, None))
             missing = cart.post(f"{path}/resolve-store", headers=self.owner)
@@ -114,7 +108,7 @@ class SavedAddressTests(unittest.TestCase):
             self.assertEqual(cart.patch(path, headers=self.owner, json=DUBAI).status_code, 200)
 
         with TestClient(familycart_app) as cart, patch.object(familycart_app.state, "maps_http", self.upstream):
-            saved = cart.get(PERSONAL, headers=self.owner).json()[0]
+            saved = cart.get(SHARED, headers=self.owner).json()[0]
             self.assertEqual({key: saved[key] for key in ADDRESS | DUBAI}, ADDRESS | DUBAI)
             result = cart.post(f"{path}/resolve-store", headers=self.owner, json={"store_id": "uae-al-ain"})
             self.assertEqual(result.json()["store_id"], "uae-dubai")
@@ -125,18 +119,13 @@ class SavedAddressTests(unittest.TestCase):
 
     def test_address_permissions_and_unavailable_maps(self) -> None:
         with TestClient(familycart_app) as cart, patch.object(familycart_app.state, "maps_http", self.upstream):
-            incomplete = cart.post(PERSONAL, headers=self.owner, json={**ADDRESS, "latitude": 25})
+            incomplete = cart.post(SHARED, headers=self.owner, json={**ADDRESS, "latitude": 25})
             self.assertEqual(incomplete.status_code, 422)
-            personal = cart.post(PERSONAL, headers=self.owner, json=ADDRESS | DUBAI).json()
-            path = f"{PERSONAL}/{personal['id']}"
-            self.assertEqual(cart.get(PERSONAL, headers=self.member).json(), [])
-            self.assertEqual(cart.patch(path, headers=self.member, json=AL_AIN).status_code, 404)
-            self.assertEqual(cart.post(f"{path}/resolve-store", headers=self.member).status_code, 404)
-            self.assertEqual(cart.post(f"{path}/resolve-store").status_code, 401)
-            self.assertFalse(self.requests)
 
             shared = cart.post(SHARED, headers=self.owner, json=ADDRESS | DUBAI).json()
             shared_path = f"{SHARED}/{shared['id']}"
+            self.assertEqual(cart.post(f"{shared_path}/resolve-store").status_code, 401)
+            self.assertFalse(self.requests)
             self.assertEqual(cart.patch(shared_path, headers=self.member, json=AL_AIN).status_code, 403)
             # Only its owner and the primary can see a household address.
             self.assertEqual(cart.post(f"{shared_path}/resolve-store", headers=self.member).status_code, 404)

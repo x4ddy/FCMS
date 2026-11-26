@@ -167,6 +167,14 @@ def connect_database(target: DatabaseTarget) -> DatabaseConnection:
     return DatabaseConnection(database, "sqlite")
 
 
+def database_unavailable_types() -> tuple[type[BaseException], ...]:
+    """Temporary problems (no connection, no free slot, a wait that took too long), unlike a wrong query."""
+    errors: tuple[type[BaseException], ...] = (sqlite3.OperationalError,)
+    if psycopg is not None:
+        errors += (psycopg.OperationalError,)
+    return errors
+
+
 def database_error_types() -> tuple[type[BaseException], ...]:
     errors: tuple[type[BaseException], ...] = (sqlite3.OperationalError,)
     if psycopg is not None:

@@ -112,7 +112,7 @@ class SharedShoppingListTests(unittest.TestCase):
             404,
         )
 
-    def test_move_to_shared_and_personal_cart(self) -> None:
+    def test_move_to_shared_cart(self) -> None:
         adult_sku = next(sku for sku, product in app.state.products.items() if product.min_age)
         path = self.new_list()
         milk = self.add(path, self.member, sku="milk", quantity=2).json()
@@ -137,12 +137,11 @@ class SharedShoppingListTests(unittest.TestCase):
         self.assertEqual(refused["moved"], [])
         self.assertEqual(refused["skipped"][0]["reason"], "This product requires an adults-only cart")
 
+        # There is no personal cart any more; "personal" is just an unknown cart.
         personal = self.client.post(f"{path}/move-to-cart", headers=self.member, json={
             "target": "personal", "item_ids": [eggs["id"]],
         })
-        self.assertEqual(personal.json()["moved"], [eggs["id"]])
-        items = self.client.get("/api/v1/personal-cart", headers=self.member).json()["items"]
-        self.assertEqual(items, [{"sku": "eggs", "quantity": 1}])
+        self.assertEqual(personal.status_code, 404)
 
     def test_move_requires_cart_access(self) -> None:
         private = self.client.post(f"{self.root}/carts", headers=self.primary, json={"name": "Private"}).json()

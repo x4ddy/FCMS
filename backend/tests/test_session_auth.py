@@ -507,7 +507,7 @@ class RoutePolicyTests(unittest.TestCase):
         item = f"{h}/carts/{{cart_id}}/items/{{sku}}"
         shopping_list = f"{h}/lists/{{list_id}}"
         self.assertEqual(normal, {
-            "PATCH personal-cart/items/{sku}", f"PATCH {item}", f"DELETE {item}",
+            f"PATCH {item}", f"DELETE {item}",
             f"PUT {item}/contributions/me", f"PATCH {item}/contributions/me", f"DELETE {item}/contributions/{{contributor_id}}",
             f"POST {h}/lists", f"PATCH {shopping_list}", f"POST {shopping_list}/items", f"POST {shopping_list}/items/bulk",
             f"POST {shopping_list}/items/clear-checked", f"POST {shopping_list}/move-to-cart",
