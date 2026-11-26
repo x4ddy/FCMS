@@ -44,12 +44,14 @@ export function ProductImage({ product, className = '' }) {
     onError={() => setFailed(product.image_url)} />
 }
 
-/** − n + with large targets. Busy shows a small spinner beside the number, which stays visible. */
+/** − n + with large targets. While a change is not confirmed yet, a spinner takes the number's place. */
 export function Stepper({ label, quantity, onAdjust, disabled, canRemove = true, removeHint, busy = false }) {
   return <span className="stepper" role="group" aria-busy={busy} aria-label={`Quantity for ${label}`}>
     <button type="button" aria-label={`Remove one ${label}`} disabled={disabled || quantity < 1 || !canRemove}
       title={canRemove ? undefined : removeHint} onClick={() => onAdjust(-1)}><Icon name="minus" size={16} /></button>
-    <span className="stepper-quantity"><strong key={quantity}>{quantity}</strong>{busy && <i className="stepper-spinner" aria-hidden="true" />}</span>
+    <span className="stepper-quantity">{busy
+      ? <><i className="stepper-spinner" aria-hidden="true" /><span className="visually-hidden">{quantity}</span></>
+      : <strong key={quantity}>{quantity}</strong>}</span>
     <button type="button" aria-label={`Add one ${label}`} disabled={disabled || quantity >= 99}
       onClick={() => onAdjust(1)}><Icon name="plus" size={16} /></button>
   </span>

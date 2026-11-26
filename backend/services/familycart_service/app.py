@@ -43,7 +43,7 @@ from .catalogue import Product, load_catalogue
 from .db import (
     ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, contribution_quantity, database_target, delete_cart,
     initialize_database, load_carts,
-    household_member, load_contributions, lock_household, set_contribution, transaction,
+    household_member, load_contributions, lock_household, record_event, set_contribution, transaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -309,9 +309,12 @@ def household_access(
     conceal_revoked: bool = False, lock_membership: bool = False, snapshot: bool = False,
 ) -> Iterator[tuple[DatabaseConnection, bool]]:
     with transaction(request.app.state.db_path, write=write, snapshot=snapshot) as db:
-        if write:
-            lock_household(db, household_id)
-        member = active_member(db, household_id, caller.user_id, lock=lock_membership)
+        if write and not lock_membership:
+            member = lock_household(db, household_id, caller.user_id)
+        else:
+            if write:
+                lock_household(db, household_id)
+            member = active_member(db, household_id, caller.user_id, lock=lock_membership)
         if member is None:
             membership = None if conceal_revoked else household_member(db, household_id, caller.user_id)
             if membership is not None and not bool(membership["active"]):
@@ -342,13 +345,7 @@ def record_cart_change(
     db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None = None, *, reason: str | None = None
 ) -> int:
     notify_changed(db, household_id)
-    event = db.execute(
-        """INSERT INTO cart_sync_events (household_id, cart_id, actor_id, reason, request_id)
-           VALUES (?, ?, ?, ?, ?) RETURNING id""",
-        (household_id, cart_id, actor_id, reason, event_key(db)),
-    ).fetchone()
-    db.execute("UPDATE carts SET revision = ? WHERE id = ?", (event["id"], cart_id))
-    return event["id"]
+    return record_event(db, household_id, cart_id, actor_id, reason, event_key(db), column="revision")
 
 
 def can_create_adults_only_cart(caller: Identity, is_primary: bool) -> bool:
@@ -1294,7 +1291,7 @@ def delete_address(
 def cart_grantees(db: DatabaseConnection, cart: CartResponse, *, include_creator: bool) -> list[str]:
     rows = db.execute(
         """
-        SELECT members.user_id
+        SELECT members.user_id, members.is_adult
         FROM carts JOIN household_members AS members ON members.household_id = carts.household_id
         LEFT JOIN cart_grants ON cart_grants.cart_id = carts.id AND cart_grants.member_id = members.user_id
         JOIN households AS household ON household.id = carts.household_id
@@ -1306,18 +1303,11 @@ def cart_grantees(db: DatabaseConnection, cart: CartResponse, *, include_creator
         """,
         (cart.id, include_creator),
     )
-    ids = [row["user_id"] for row in rows]
+    rows = rows.fetchall()
     if include_creator and cart.adults_only:
-        adult_rows = db.execute(
-            "SELECT user_id FROM household_members WHERE household_id = ? AND is_adult = 1",
-            (db.execute("SELECT household_id FROM carts WHERE id = ?", (cart.id,)).fetchone()["household_id"],),
-        )
-        adult_ids = {row["user_id"] for row in adult_rows}
-        adult_ids.update(
-            user_id for user_id, fixture in MEMBERS_BY_ID.items() if fixture.identity.is_adult
-        )
-        ids = [user_id for user_id in ids if user_id in adult_ids]
-    return ids
+        fixtures = {user_id for user_id, fixture in MEMBERS_BY_ID.items() if fixture.identity.is_adult}
+        rows = [row for row in rows if row["is_adult"] == 1 or row["user_id"] in fixtures]
+    return [row["user_id"] for row in rows]
 
 
 @app.get(f"{HOUSEHOLD}/carts/{{cart_id}}/grants")
@@ -1330,10 +1320,11 @@ def list_grants(
         return cart_grantees(db, cart, include_creator=include_creator)
 
 
-@app.put(f"{HOUSEHOLD}/carts/{{cart_id}}/grants/{{member_id}}", status_code=204)
+@app.put(f"{HOUSEHOLD}/carts/{{cart_id}}/grants/{{member_id}}")
 def grant_access(
     household_id: str, cart_id: str, member_id: str, request: Request, caller: Caller
-) -> Response:
+) -> list[str]:
+    """Give a member access. Answers with who may use the cart now, as saved."""
     with change_cart(request, household_id, cart_id, caller) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         require_primary(cart.can_manage_access)
@@ -1341,16 +1332,8 @@ def grant_access(
         if member is None:
             raise HTTPException(status_code=404, detail="Member not found")
         if member["owner_id"] == member_id:
-            return Response(status_code=204)
-        profile = db.execute(
-            "SELECT is_adult FROM household_members WHERE household_id = ? AND user_id = ?",
-            (household_id, member_id),
-        ).fetchone()
-        fixture = MEMBERS_BY_ID.get(member_id)
-        target_is_adult = bool(profile["is_adult"]) if profile else bool(
-            fixture and fixture.identity.is_adult
-        )
-        if cart.adults_only and not target_is_adult:
+            return cart_grantees(db, cart, include_creator=True)
+        if cart.adults_only and not member["is_adult"]:
             raise HTTPException(
                 status_code=403, detail="Adults-only grants require a verified adult member"
             )
@@ -1365,13 +1348,14 @@ def grant_access(
             """,
             (household_id, cart_id, member_id),
         )
-    return Response(status_code=204)
+        return cart_grantees(db, cart, include_creator=True)
 
 
-@app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}/grants/{{member_id}}", status_code=204)
+@app.delete(f"{HOUSEHOLD}/carts/{{cart_id}}/grants/{{member_id}}")
 def revoke_access(
     household_id: str, cart_id: str, member_id: str, request: Request, caller: Caller
-) -> Response:
+) -> list[str]:
+    """Take a member's access away. Answers with who may use the cart now, as saved."""
     with change_cart(request, household_id, cart_id, caller) as (db, is_primary):
         cart = require_visible_cart(db, household_id, cart_id, caller, is_primary)
         require_primary(cart.can_manage_access)
@@ -1384,7 +1368,7 @@ def revoke_access(
                  AND creator_id <> (SELECT admin_id FROM households WHERE households.id = carts.household_id)""",
             (cart_id, member_id),
         )
-    return Response(status_code=204)
+        return cart_grantees(db, cart, include_creator=True)
 
 
 def require_product_for_cart(request: Request, sku: str, caller: Identity, cart: CartResponse) -> None:

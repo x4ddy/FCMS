@@ -94,7 +94,7 @@ class AgeApprovalTests(FamilyCase):
 
         self.decide("m", True)
         self.assertTrue(self.sees_adult_products(self.m))
-        self.call("PUT", f"{self.root}/carts/{adults_only}/grants/m", self.p, 204)
+        self.call("PUT", f"{self.root}/carts/{adults_only}/grants/m", self.p, 200)
         self.call("PATCH", f"{self.root}/carts/{adults_only}/items/{self.adult_sku}", self.m, delta=1)
 
         self.decide("m", False)

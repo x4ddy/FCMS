@@ -136,7 +136,7 @@ class CheckoutTests(unittest.TestCase):
 
     def grant_member(self):
         response = self.cart.put(f"{REGULAR_CART}/grants/user-adult", headers=self.owner)
-        self.assertEqual(response.status_code, 204, response.text)
+        self.assertEqual(response.status_code, 200, response.text)
 
     def test_order_through_gateway_replays_and_survives_restart(self):
         address = self.address()
@@ -400,7 +400,7 @@ class CheckoutTests(unittest.TestCase):
         with transaction(self.db, write=True) as db:
             db.execute("""INSERT INTO household_members (household_id, user_id, display_name)
                           VALUES ('demo-household', 'new-google-user', 'New user')""")
-        self.assertEqual(self.cart.put(f"{REGULAR_CART}/grants/new-google-user", headers=self.owner).status_code, 204)
+        self.assertEqual(self.cart.put(f"{REGULAR_CART}/grants/new-google-user", headers=self.owner).status_code, 200)
         address = self.address(headers=headers)
         self.item(headers=headers)
         self.assert_problem(self.review(address, headers=headers), 403, "AGE_ELIGIBILITY_REQUIRED")

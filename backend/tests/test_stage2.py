@@ -64,11 +64,20 @@ class StageTwoTests(unittest.TestCase):
             f"{cart}/items/milk/contributions/me", headers=headers, json={"quantity": quantity}
         )
 
+    def test_saving_access_answers_with_the_saved_list(self) -> None:
+        grants = f"{REGULAR}/grants"
+        given = self.cart.put(CHILD_GRANT, headers=self.primary).json()
+        self.assertEqual(given, self.cart.get(f"{grants}?include_creator=true", headers=self.primary).json())
+        self.assertIn("user-child", given)
+        taken = self.cart.delete(CHILD_GRANT, headers=self.primary).json()
+        self.assertEqual(taken, self.cart.get(f"{grants}?include_creator=true", headers=self.primary).json())
+        self.assertNotIn("user-child", taken)
+
     def test_grant_and_revoke_with_the_same_child_token(self) -> None:
         self.assertEqual(self.cart.get(CARTS, headers=self.child).json(), [])
         for _ in range(2):
             grant = self.cart.put(CHILD_GRANT, headers=self.primary)
-            self.assertEqual((grant.status_code, grant.content), (204, b""))
+            self.assertEqual((grant.status_code, "user-child" in grant.json()), (200, True))
         self.assertEqual(self.cart.get(f"{REGULAR}/grants", headers=self.primary).json(), ["user-child"])
         [cart] = self.cart.get(CARTS, headers=self.child).json()
         self.assertEqual(cart["id"], "regular-cart")
@@ -85,7 +94,7 @@ class StageTwoTests(unittest.TestCase):
 
         for _ in range(2):
             revoke = self.cart.delete(CHILD_GRANT, headers=self.primary)
-            self.assertEqual((revoke.status_code, revoke.content), (204, b""))
+            self.assertEqual((revoke.status_code, revoke.json()), (200, []))
         denied = self.set_milk(REGULAR, self.child, 9)
         self.assertEqual(denied.status_code, 403)
         self.assertEqual(
@@ -106,9 +115,9 @@ class StageTwoTests(unittest.TestCase):
         child_cart = f"{CARTS}/{created.json()['id']}"
         self.assertEqual(created.json()["name"], "School snacks")
         self.assertFalse(created.json()["adults_only"])
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
-        self.assertEqual(self.cart.delete(CHILD_GRANT, headers=self.primary).status_code, 204)
-        self.assertEqual(self.cart.put(f"{child_cart}/grants/user-child", headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
+        self.assertEqual(self.cart.delete(CHILD_GRANT, headers=self.primary).status_code, 200)
+        self.assertEqual(self.cart.put(f"{child_cart}/grants/user-child", headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(child_cart, self.child, 2).status_code, 200)
         primary_view = self.cart.get(child_cart, headers=self.primary).json()
         self.assertTrue(primary_view["can_manage_access"])
@@ -120,7 +129,7 @@ class StageTwoTests(unittest.TestCase):
         effective = self.cart.get(f"{child_cart}/grants?include_creator=true", headers=self.primary)
         self.assertEqual(effective.json(), ["user-adult", "user-child"])
         self.assertEqual(self.set_milk(child_cart, self.primary, 2).status_code, 200)
-        self.assertEqual(self.cart.delete(f"{child_cart}/grants/user-primary", headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.delete(f"{child_cart}/grants/user-primary", headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(child_cart, self.primary, 1).status_code, 200)
         self.assertEqual(self.cart.get(f"{child_cart}/grants", headers=self.child).status_code, 403)
         self.assertEqual(self.cart.put(f"{child_cart}/grants/user-primary", headers=self.child).status_code, 403)
@@ -133,10 +142,10 @@ class StageTwoTests(unittest.TestCase):
         cart_id = created["id"]
         cart = f"{CARTS}/{cart_id}"
         grant = f"{cart}/grants/user-child"
-        self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 200)
         edit = self.set_milk(cart, self.primary, 2).json()
-        self.assertEqual(self.cart.delete(grant, headers=self.primary).status_code, 204)
-        self.assertEqual(self.cart.delete(grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.delete(grant, headers=self.primary).status_code, 200)
+        self.assertEqual(self.cart.delete(grant, headers=self.primary).status_code, 200)
         self.assertEqual(
             self.cart.get(f"{cart}/grants?include_creator=true", headers=self.primary).json(),
             ["user-adult"],
@@ -158,7 +167,7 @@ class StageTwoTests(unittest.TestCase):
         initialize_database(self.db_path)
         self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.get(cart, headers=self.primary).json()["contributions"][0]["quantity"], 2)
-        self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 200)
         self.assertEqual(
             self.cart.get(f"{cart}/grants", headers=self.primary).json(),
             ["user-adult", "user-child"],
@@ -210,7 +219,7 @@ class StageTwoTests(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as db, db:
             db.execute("INSERT INTO cart_grants VALUES ('demo-household', 'adults-only-cart', 'user-child')")
         self.assertEqual(self.set_milk(ADULTS_ONLY, self.child, 1).status_code, 404)
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         with closing(sqlite3.connect(self.db_path)) as db, db:
             db.execute("UPDATE household_members SET active = 0 WHERE user_id = 'user-child'")
         self.assertEqual(self.set_milk(REGULAR, self.child, 1).status_code, 403)
@@ -229,7 +238,7 @@ class StageTwoTests(unittest.TestCase):
             db.execute("UPDATE carts SET name = 'Existing name' WHERE id = 'regular-cart'")
         initialize_database(self.db_path)
         self.assertEqual(self.cart.get(REGULAR, headers=self.primary).json()["name"], "Existing name")
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(REGULAR, self.child, 4).status_code, 200)
         initialize_database(self.db_path)
         self.assertEqual(self.cart.get(REGULAR, headers=self.child).json()["contributions"], [
@@ -239,7 +248,7 @@ class StageTwoTests(unittest.TestCase):
     def test_quantity_adjustment_and_removal_permissions(self) -> None:
         item = f"{REGULAR}/items/milk/contributions"
         shared_item = f"{REGULAR}/items/milk"
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         for delta, quantity in ((1, 1), (1, 2), (-1, 1), (-1, 0), (-1, 0), (1, 1)):
             result = self.cart.patch(shared_item, headers=self.primary, json={"delta": delta})
             self.assertEqual(result.status_code, 200)
@@ -278,17 +287,17 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.cart.get(f"{members}?include_roles=true", headers=self.primary).status_code, 200)
 
     def test_cart_deletion_requires_primary_or_creator_and_survives_restart(self) -> None:
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         self.assertFalse(self.cart.get(REGULAR, headers=self.child).json()["can_delete_cart"])
         self.assertEqual(self.cart.delete(REGULAR, headers=self.child).status_code, 403)
         created = self.cart.post(CARTS, headers=self.primary, json={"name": "Disposable cart"}).json()
         own_cart = f"{CARTS}/{created['id']}"
         own_grant = f"{own_cart}/grants/user-child"
-        self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(own_cart, self.child, 4).status_code, 200)
-        self.assertEqual(self.cart.delete(own_grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.delete(own_grant, headers=self.primary).status_code, 200)
         self.assertEqual(self.cart.delete(own_cart, headers=self.child).status_code, 403)
-        self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 200)
         self.assertFalse(self.cart.get(own_cart, headers=self.child).json()["can_delete_cart"])
         self.assertEqual(self.cart.delete(own_cart, headers=self.child).status_code, 403)
         self.assertEqual(self.cart.delete(own_cart, headers=self.primary).status_code, 204)
@@ -318,7 +327,7 @@ class StageTwoTests(unittest.TestCase):
             ).status_code,
             404,
         )
-        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 204)
+        self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         restricted_path = f"{REGULAR}/items/{restricted['sku']}/contributions/me"
         self.assertEqual(self.cart.put(restricted_path, headers=self.child, json={"quantity": 1}).status_code, 404)
         self.assertEqual(self.cart.put(restricted_path, headers=self.primary, json={"quantity": 1}).status_code, 403)

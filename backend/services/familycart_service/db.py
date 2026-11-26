@@ -170,7 +170,7 @@ def active_member(
     row_lock = "FOR SHARE OF members, household" if lock and db.dialect == "postgresql" else ""
     return db.execute(
         f"""
-        SELECT household.admin_id AS owner_id, members.age_status
+        SELECT household.admin_id AS owner_id, members.age_status, members.is_adult
         FROM household_members AS members
         JOIN households AS household ON household.id = members.household_id
         WHERE members.household_id = ? AND members.user_id = ? AND members.active = 1
@@ -180,8 +180,26 @@ def active_member(
     ).fetchone()
 
 
-def lock_household(db: DatabaseConnection, household_id: str) -> None:
-    # Every household writer takes this lock before reading roles or changing carts.
+def lock_household(db: DatabaseConnection, household_id: str, user_id: str | None = None):
+    """Every household writer takes this lock before reading roles or changing carts.
+
+    Given ``user_id``, also returns that person's active membership (like active_member), or None.
+    On PostgreSQL both come from one query, which saves a trip to the database on every change.
+    """
+    if db.dialect == "postgresql" and user_id is not None:
+        row = db.execute(
+            """SELECT households.admin_id AS owner_id, members.age_status, members.is_adult,
+                      members.user_id AS member, limits.*
+               FROM households
+               CROSS JOIN (
+                   SELECT set_config('lock_timeout', '3500ms', true), set_config('statement_timeout', '4500ms', true)
+                   OFFSET 0
+               ) AS limits(lock_wait, statement_limit)
+               LEFT JOIN household_members AS members
+                 ON members.household_id = households.id AND members.user_id = ? AND members.active = 1
+               WHERE households.id = ? FOR NO KEY UPDATE OF households""", (user_id, household_id),
+        ).fetchone()
+        return row if row is not None and row["member"] is not None else None
     if db.dialect == "postgresql":
         # The same query limits how long this transaction waits, so work a browser has
         # stopped waiting for (5 seconds) does not keep holding connections.
@@ -192,6 +210,27 @@ def lock_household(db: DatabaseConnection, household_id: str) -> None:
                ) AS limits(lock_wait, statement_limit)
                WHERE households.id = ? FOR NO KEY UPDATE OF households""", (household_id,),
         ).fetchone()
+    return active_member(db, household_id, user_id) if user_id is not None else None
+
+
+def record_event(
+    db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None, reason: str | None,
+    request_id: str | None, *, column: str,
+) -> int:
+    """Add a "this cart changed" event and store its number in carts.revision or carts.live_revision."""
+    values = (household_id, cart_id, actor_id, reason, request_id)
+    insert = """INSERT INTO cart_sync_events (household_id, cart_id, actor_id, reason, request_id)
+                VALUES (?, ?, ?, ?, ?) RETURNING id"""
+    if db.dialect == "postgresql":
+        # One statement instead of two.
+        return db.execute(
+            f"""WITH event AS ({insert})
+                UPDATE carts SET {column} = event.id FROM event WHERE carts.id = ? RETURNING event.id""",
+            (*values, cart_id),
+        ).fetchone()["id"]
+    event = db.execute(insert, values).fetchone()["id"]
+    db.execute(f"UPDATE carts SET {column} = ? WHERE id = ?", (event, cart_id))
+    return event
 
 
 def household_member(db: DatabaseConnection, household_id: str, user_id: str):

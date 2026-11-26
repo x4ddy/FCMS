@@ -68,6 +68,13 @@ export function CartView({
   const locked = Boolean(checkoutBy)
   const selectable = Boolean(cart?.can_checkout) && !locked
   const others = members.filter((member) => member.role !== 'primary' && (!cart?.adults_only || member.is_adult))
+  // Members whose access is being saved. Their switch shows the saved state only, with a spinner meanwhile.
+  const [savingAccess, setSavingAccess] = useState(() => new Set())
+  async function changeAccess(member, grant) {
+    setSavingAccess((current) => new Set(current).add(member))
+    try { await onChangeGrant(member, grant) }
+    finally { setSavingAccess((current) => { const next = new Set(current); next.delete(member); return next }) }
+  }
 
   return <>
     <div className="drawer-body">
@@ -115,10 +122,14 @@ export function CartView({
           {others.length === 0 ? <p className="muted">Nobody else can be given access yet.</p> : <ul className="plain-rows">
             {others.map((member) => {
               const granted = grants.includes(member.id)
+              const saving = savingAccess.has(member.id)
               return <li key={member.id}>
                 <span className="person"><Avatar id={member.id} name={member.display_name} />{member.display_name}</span>
-                <button type="button" role="switch" aria-checked={granted} aria-label={`Access for ${member.display_name}`}
-                  className="switch" disabled={busy} onClick={() => onChangeGrant(member.id, !granted)}><span /></button>
+                <span className="switch-cell">
+                  {saving && <i className="switch-spinner" aria-hidden="true" />}
+                  <button type="button" role="switch" aria-checked={granted} aria-busy={saving} aria-label={`Access for ${member.display_name}`}
+                    className="switch" disabled={saving} onClick={() => changeAccess(member.id, !granted)}><span /></button>
+                </span>
               </li>
             })}
           </ul>}

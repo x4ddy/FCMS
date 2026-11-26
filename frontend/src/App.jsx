@@ -895,10 +895,19 @@ function App() {
               setSelected(next)
             }}
             onSelectAll={(all) => { setAllSelected(all); setSelected(new Set()) }}
-            onChangeGrant={(member, grant) => run(async () => {
-              await api.changeGrant(cartId, member, grant)
-              setGrants(await api.grants(cartId))
-            })}
+            onChangeGrant={async (member, grant) => {
+              // Shown only once saved: the reply is the list as stored.
+              const id = cartId
+              try {
+                let saved = await api.changeGrant(id, member, grant)
+                // An older backend answers without the list; then read it separately.
+                if (!Array.isArray(saved)) saved = await api.grants(id)
+                if (cartIdRef.current === id) setGrants(saved)
+              } catch (error) {
+                if (error.status === 401) { clearSession(); return }
+                showPopup(error.message, 'error')
+              }
+            }}
             onCreateCart={(name, adultsOnly) => run(async () => {
               const created = await api.create(name, adultsOnly)
               setCarts(await api.carts())

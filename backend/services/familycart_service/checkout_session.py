@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from backend.shared.database import DatabaseConnection
 
-from .db import delete_cart, set_contribution
+from .db import delete_cart, record_event, set_contribution
 from .live_sync import notify_changed
 from .operations import event_key
 
@@ -40,12 +40,7 @@ def stored_session(db: DatabaseConnection, cart_id: str):
 def record_waiting_change(db: DatabaseConnection, household_id: str, cart_id: str, actor_id: str | None) -> int:
     """Tell live viewers, without changing the cart revision the open review is checked against."""
     notify_changed(db, household_id)
-    revision = db.execute(
-        "INSERT INTO cart_sync_events (household_id, cart_id, actor_id, request_id) VALUES (?, ?, ?, ?) RETURNING id",
-        (household_id, cart_id, actor_id, event_key(db)),
-    ).fetchone()["id"]
-    db.execute("UPDATE carts SET live_revision = ? WHERE id = ?", (revision, cart_id))
-    return revision
+    return record_event(db, household_id, cart_id, actor_id, None, event_key(db), column="live_revision")
 
 
 def current_session(db: DatabaseConnection, household_id: str, cart_id: str):

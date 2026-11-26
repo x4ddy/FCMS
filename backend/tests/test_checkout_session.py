@@ -183,7 +183,7 @@ class CheckoutSessionTests(base.CheckoutTests):
 
     def test_primary_users_check_out_with_their_own_address_and_children_cannot(self):
         self.grant_member()
-        self.call("PUT", f"{CART}/grants/user-child", self.owner, 204)
+        self.call("PUT", f"{CART}/grants/user-child", self.owner, 200)
         admins = self.address(kind="household")
         mine = self.address(kind="household", headers=self.member)
         self.tap("milk", 1, self.minor)  # children can add
@@ -200,7 +200,7 @@ class CheckoutSessionTests(base.CheckoutTests):
     def test_access_is_needed_to_check_out(self):
         mine = self.address(kind="household", headers=self.member)
         self.tap("milk", 1, self.owner)
-        self.call("DELETE", f"{CART}/grants/user-adult", self.owner, 204)
+        self.call("DELETE", f"{CART}/grants/user-adult", self.owner, 200)
         self.call("POST", CHECKOUT, self.member, 403)
         self.assert_problem(self.review(mine, cart=SHARED, headers=self.member), 404, "CART_NOT_FOUND")
 
@@ -276,7 +276,7 @@ class CheckoutSessionTests(base.CheckoutTests):
         self.assertFalse({p.sku for p in tobacco} & {p["sku"] for p in products})
         self.assertNotIn("Tobacco", {p["category"] for p in products})
         self.call("GET", f"{API}/products/{tobacco[0].sku}", self.minor, 404)
-        self.call("PUT", f"{CART}/grants/user-child", self.owner, 204)
+        self.call("PUT", f"{CART}/grants/user-child", self.owner, 200)
         self.tap("milk", 1, self.owner)
         self.call("POST", CHECKOUT, self.owner)
         self.tap(tobacco[0].sku, 1, self.minor, 404)
