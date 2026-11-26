@@ -67,6 +67,13 @@ class GatewaySecurityTests(unittest.TestCase):
         self.assertEqual(response.headers["x-frame-options"], "DENY")
         self.assertTrue(response.headers["x-request-id"])
 
+    def test_child_redemption_is_public_and_code_issuance_is_protected(self) -> None:
+        signup = self.client.post("/api/v1/auth/child", json={"code": "test"})
+        self.assertEqual(signup.status_code, 200)
+        self.assertEqual(self.fake.requests[-1][1], "http://127.0.0.1:8001/api/v1/auth/child")
+        issue = self.client.post("/api/v1/households/family/child-codes", json={})
+        self.assertEqual(issue.status_code, 401)
+
     def test_gateway_routes_the_versioned_household_collection(self) -> None:
         session = self.token()
         headers = {"Authorization": f"Bearer {session.access_token}"}

@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { AddressBook, AddressForm } from './AddressBook.jsx'
-import { Avatar, confirmAction, Dropdown, Icon } from './ui.jsx'
+import { Avatar, confirmAction, Dropdown, Icon, IconTile } from './ui.jsx'
 
 function HouseholdSetup({ busy, api, displayName, onCreate, onJoin }) {
   const [name, setName] = useState('')
@@ -44,12 +44,17 @@ function HouseholdSetup({ busy, api, displayName, onCreate, onJoin }) {
 export function AddressesPage({ required = false, household, userId, members, addresses, ...addressBook }) {
   const isPrimary = household.role === 'primary'
   const name = (id) => id === userId ? 'You' : members.find((member) => member.id === id)?.display_name ?? 'Member'
-  return <section className="page narrow">
-    <h1>{required ? 'Add your delivery address' : isPrimary ? 'Family addresses' : 'My addresses'}</h1>
-    <p className="muted">{required ? `Everyone in ${household.name} needs at least one address.`
-      : isPrimary ? 'As the admin, you can see every member’s addresses.'
-        : 'You and the household admin can see these.'}</p>
-    <AddressBook {...addressBook} addresses={required ? [] : addresses} startOpen={required}
+  return <section className={`page addresses-page${required ? ' narrow' : ''}`}>
+    <div className="page-title">
+      <IconTile name="pin" size={30} />
+      <div>
+        <h1>{required ? 'Add your delivery address' : isPrimary ? 'Family addresses' : 'My addresses'}</h1>
+        <p className="muted">{required ? `Everyone in ${household.name} needs at least one address.`
+          : isPrimary ? 'As the admin, you can see every member’s addresses.'
+            : 'You and the household admin can see these.'}</p>
+      </div>
+    </div>
+    <AddressBook {...addressBook} addresses={required ? [] : addresses} startOpen={required} split={!required}
       ownerName={isPrimary ? (address) => name(address.created_by) : undefined}
       buttonLabel={required ? 'Save and continue' : 'Add address'} />
   </section>
@@ -74,7 +79,7 @@ function RequestForm({ busy, onRequest }) {
   </form>
 }
 
-function MemberRow({ member, household, session, busy, onDecideAge, onTransfer, onRevoke }) {
+function MemberRow({ member, household, session, busy, onDecideAge, onTransfer, onRevoke, onChildCode }) {
   const role = member.id === session.user.id ? household.role : member.role
   const manage = household.role === 'primary' && member.role !== 'primary'
   return <li className="member-row">
@@ -94,12 +99,14 @@ function MemberRow({ member, household, session, busy, onDecideAge, onTransfer, 
         <button disabled={busy} onClick={() => onDecideAge(member.id, true)}>Make primary user</button>}
       {session.is_adult && ['PENDING', 'APPROVED'].includes(member.age_status) && (member.is_adult || member.age_status === 'PENDING') &&
         <button className="secondary" disabled={busy} onClick={() => onDecideAge(member.id, false)}>{member.age_status === 'PENDING' ? 'Keep as child' : 'Make child user'}</button>}
+      {member.is_child_account ? <button className="secondary" disabled={busy}
+        onClick={() => onChildCode(member.id)}>Get sign-in code</button> :
       <button className="secondary" disabled={busy} onClick={async () => {
         if (await confirmAction({
           title: `Make ${member.display_name} the admin?`,
           text: 'They will manage members, carts and checkout, and see every address. You stop being the admin.', action: 'Transfer ownership',
         })) onTransfer(member.id)
-      }}>Make admin</button>
+      }}>Make admin</button>}
       <button className="secondary danger" disabled={busy} onClick={async () => {
         if (await confirmAction({
           title: `Remove ${member.display_name}?`, text: 'They lose access to this household’s carts and lists straight away.',
@@ -113,9 +120,12 @@ function MemberRow({ member, household, session, busy, onDecideAge, onTransfer, 
 export function HouseholdPage({
   household, households, session, account, carts, members, addresses, busy, invitation, roleName, memberRequests,
   onRequestMember, onDecideRequest, onCollectInvitation,
-  onLeave, onDelete, onCreate, onJoin, onSelectHousehold, onInvite, onNotify, onRevoke, onDecideAge, onTransferHousehold,
+  onLeave, onDelete, onCreate, onJoin, onSelectHousehold, onInvite, onChildCode, onNotify, onRevoke, onDecideAge, onTransferHousehold,
   onOpenAddresses, onOpenLists, onOpenCart,
 }) {
+  if (!household && session.user.is_child_account) return <section className="page narrow">
+    <h1>No active household</h1><p>Contact your household admin for help.</p>
+  </section>
   if (!household) return <section className="page narrow">
     <h1>Set up your household</h1>
     <p className="muted">A household has one admin, and as many primary users and child users as you like.</p>
@@ -140,16 +150,21 @@ export function HouseholdPage({
     </div>}
     <section className="panel">
       <div className="section-head"><h2>Members</h2>
-        {household.role === 'primary' && <button onClick={onInvite} disabled={busy}><Icon name="plus" size={16} /> Invite member</button>}
+        {household.role === 'primary' && <div className="member-invite-actions">
+          <button onClick={onInvite} disabled={busy}><Icon name="plus" size={16} /> Invite member</button>
+          <button className="secondary" onClick={() => onChildCode()} disabled={busy}><Icon name="plus" size={16} /> Add Child</button>
+        </div>}
       </div>
-      {invitation && <div className="invite-code">
-        <small>Private one-time invitation code</small><code>{invitation.invitation_code}</code>
+      {invitation && (!invitation.child || household.role === 'primary') && <div className="invite-code">
+        <small>{invitation.child ? `Child sign-in code · expires ${new Date(invitation.expires_at).toLocaleString()}` : 'Private one-time invitation code'}</small>
+        {invitation.child && <span>Choose “Use a child code” on the sign-in screen. This code works once within 24 hours.</span>}
+        <code>{invitation.invitation_code}</code>
         <button className="secondary" onClick={() => navigator.clipboard.writeText(invitation.invitation_code)
           .then(() => onNotify('Invitation code copied.'), () => onNotify('Copying failed. Select the code and copy it.', 'error'))}>Copy</button>
       </div>}
       <ul className="member-list">
         {shown.map((member) => <MemberRow key={member.id} member={member} household={household} session={session} busy={busy}
-          onDecideAge={onDecideAge} onTransfer={onTransferHousehold} onRevoke={onRevoke} />)}
+          onDecideAge={onDecideAge} onTransfer={onTransferHousehold} onRevoke={onRevoke} onChildCode={onChildCode} />)}
       </ul>
     </section>
     {roleName !== 'Child user' && (roleName === 'Primary user' || memberRequests.length > 0) && <section className="panel">
@@ -171,10 +186,10 @@ export function HouseholdPage({
         <span className="muted">{carts.length} {carts.length === 1 ? 'cart' : 'carts'} you can use</span></button>
       <button className="link-card" onClick={onOpenLists}><Icon name="list" size={26} /><strong>Shopping lists</strong>
         <span className="muted">Plan together, then pick what goes in a cart</span></button>
-      <button className="link-card" onClick={onOpenAddresses}><Icon name="pin" size={26} /><strong>{household.role === 'primary' ? 'Family addresses' : 'My addresses'}</strong>
-        <span className="muted">{addresses.length} saved</span></button>
+      {!session.user.is_child_account && <button className="link-card" onClick={onOpenAddresses}><Icon name="pin" size={26} /><strong>{household.role === 'primary' ? 'Family addresses' : 'My addresses'}</strong>
+        <span className="muted">{addresses.length} saved</span></button>}
     </div>
-    <section className="panel leave-panel">
+    {roleName !== 'Child user' && <section className="panel leave-panel">
       {roleName === 'Admin' ? <>
         <div><h2>Delete household</h2><p className="muted">Ends {household.name} for everyone and erases its carts, lists and addresses.
           To leave without deleting it, make another member the admin first.</p></div>
@@ -192,11 +207,11 @@ export function HouseholdPage({
           })) onLeave()
         }}>Exit household</button>
       </>}
-    </section>
-    <details className="fold">
+    </section>}
+    {!session.user.is_child_account && <details className="fold">
       <summary>Create or join another household</summary>
       <HouseholdSetup key={household.id} api={account} busy={busy} displayName={session.user.display_name}
         onCreate={onCreate} onJoin={onJoin} />
-    </details>
+    </details>}
   </section>
 }

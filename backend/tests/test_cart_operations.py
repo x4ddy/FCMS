@@ -176,6 +176,7 @@ class CartOperationTests(base.CheckoutTests):
         self.assertEqual(self.quantity(), 7)
 
     def test_simultaneous_members_lose_nothing(self):
+        self.set_stock("milk", 20)
         calls = [lambda who=who, key=f"{name}-{n}": self.tap(key, 1, who)
                  for n in range(10) for name, who in (("o", self.owner), ("m", self.member))]
         self.together(*calls)
@@ -183,6 +184,7 @@ class CartOperationTests(base.CheckoutTests):
         self.assertEqual(lines, {"user-primary": 10, "user-adult": 10})
 
     def test_contents_revision_and_applied_keys_belong_to_one_moment(self):
+        self.set_stock("milk", 25)
         done = Event()
 
         def write():

@@ -129,12 +129,12 @@ def upsert_user(
            (user_id, email, google_subject, display_name, is_adult, status, created_at, updated_at, date_of_birth)
            VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
            ON CONFLICT(user_id) DO UPDATE SET
-               display_name = excluded.display_name,
+               display_name = CASE WHEN users.google_subject IS NOT NULL THEN users.display_name ELSE excluded.display_name END,
                is_adult = CASE WHEN users.date_of_birth IS NULL THEN excluded.is_adult ELSE users.is_adult END,
                updated_at = excluded.updated_at,
                email = COALESCE(excluded.email, users.email),
                google_subject = COALESCE(excluded.google_subject, users.google_subject),
                date_of_birth = COALESCE(users.date_of_birth, excluded.date_of_birth)
-           RETURNING is_adult, google_subject IS NOT NULL AND date_of_birth IS NULL AS age_setup_required""",
+           RETURNING display_name, is_adult, google_subject IS NOT NULL AND date_of_birth IS NULL AS age_setup_required""",
         (user_id, email, google_subject, display_name, int(is_adult), now, now, date_of_birth),
     ).fetchone()

@@ -1,25 +1,36 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from re import fullmatch
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Header, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, UUID4
 
+from backend.services.familycart_service import child_codes
+from backend.services.familycart_service.db import database_target, transaction as shopping_transaction
+from backend.services.familycart_service.live_sync import notify_changed
+from backend.services.refresh_service.responses import RefreshResponse, signed_in_response
 from backend.services.refresh_service.cookies import set_refresh_cookie
-from backend.services.refresh_service.service import DateOfBirthRequired, create_session, session_profile
+from backend.services.refresh_service.service import (
+    DateOfBirthRequired, InvalidRefreshToken, child_session, create_session, session_profile,
+)
 from backend.services.user_service.db import database_path, initialize_database, transaction
 from backend.shared.api import API_PREFIX
-from backend.shared.tokens import Identity, load_jwt_secret, verify_token
+from backend.shared.database import database_unavailable_types
+from backend.shared.tokens import Identity, is_child_account, load_jwt_secret, verify_token
 
 from .google_auth import (
     InvalidGoogleCredential,
     google_client_id,
     verify_google_credential,
 )
+
+logger = logging.getLogger(__name__)
+DATABASE_UNAVAILABLE = database_unavailable_types()
 
 
 def iso_birth_date(value):
@@ -80,7 +91,7 @@ class AgeStatus(BaseModel):
     session_refresh_required: bool = False
 
 
-def age_identity(
+def session_identity(
     request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> Identity:
     if credentials:
@@ -93,11 +104,55 @@ def age_identity(
     raise HTTPException(status_code=401, detail="Session has ended")
 
 
-AgeCaller = Annotated[Identity, Depends(age_identity)]
+SessionCaller = Annotated[Identity, Depends(session_identity)]
+
+
+class ProfileName(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    display_name: Annotated[str, StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=100, pattern=r"^[^\x00-\x1f\x7f]+$",
+    )]
+
+
+@app.patch(f"{API_PREFIX}/auth/profile")
+def update_profile(body: ProfileName, request: Request, response: Response, caller: SessionCaller) -> ProfileName:
+    if is_child_account(caller.user_id):
+        raise HTTPException(status_code=403, detail="Child accounts cannot change their username")
+    now = datetime.now(timezone.utc).isoformat()
+    shopping_path = database_target()
+    try:
+        with transaction(request.app.state.auth_db_path) as db:
+            saved = db.execute(
+                """UPDATE users SET display_name = ?, updated_at = ?
+                   WHERE user_id = ? AND status = 'ACTIVE'
+                     AND EXISTS (SELECT 1 FROM refresh_sessions
+                                 WHERE session_id = ? AND user_id = users.user_id
+                                   AND revoked_at IS NULL AND absolute_expires_at > ?)
+                   RETURNING display_name""",
+                (body.display_name, now, caller.user_id, caller.session_id, now),
+            ).fetchone()
+            if saved is None:
+                raise HTTPException(status_code=401, detail="Session has ended")
+            # Keep concurrent renames ordered by holding the account row until the memberships are updated.
+            with shopping_transaction(shopping_path, write=True) as shopping:
+                households = shopping.execute(
+                    """UPDATE household_members SET display_name = ?
+                       WHERE user_id = ? AND active = 1 AND (display_name IS NULL OR display_name <> ?)
+                       RETURNING household_id""",
+                    (saved["display_name"], caller.user_id, saved["display_name"]),
+                ).fetchall()
+                for household in households:
+                    notify_changed(shopping, household["household_id"], db_path=shopping_path)
+    except DATABASE_UNAVAILABLE as error:
+        logger.warning("Could not update profile: %s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="Your username could not be saved. Try again shortly.",
+                            headers={"Retry-After": "1", "Cache-Control": "no-store"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    return ProfileName(display_name=saved["display_name"])
 
 
 @app.get(f"{API_PREFIX}/auth/age", response_model_exclude_defaults=True)
-def age_status(request: Request, response: Response, caller: AgeCaller) -> AgeStatus:
+def age_status(request: Request, response: Response, caller: SessionCaller) -> AgeStatus:
     profile = session_profile(request.app.state.auth_db_path, caller.session_id, caller.user_id)
     if profile is None:
         raise HTTPException(status_code=401, detail="Session has ended")
@@ -108,7 +163,7 @@ def age_status(request: Request, response: Response, caller: AgeCaller) -> AgeSt
 
 
 @app.post(f"{API_PREFIX}/auth/age", response_model_exclude_defaults=True)
-def set_age(body: AgeInput, request: Request, response: Response, caller: AgeCaller) -> AgeStatus:
+def set_age(body: AgeInput, request: Request, response: Response, caller: SessionCaller) -> AgeStatus:
     adult = adult_from_birth_date(body.date_of_birth)
     birth = body.date_of_birth.isoformat()
     path = request.app.state.auth_db_path
@@ -190,3 +245,23 @@ def google_login(body: GoogleLoginRequest, request: Request, response: Response)
             age_setup_required=tokens.age_setup_required,
         ),
     )
+
+
+class ChildLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    code: str = Field(min_length=6, max_length=100)
+    display_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)] | None = None
+
+
+@app.post(f"{API_PREFIX}/auth/child", response_model_exclude_none=True)
+def child_login(body: ChildLoginRequest, request: Request, response: Response,
+                attempt: Annotated[UUID4, Header(alias="Idempotency-Key")]) -> RefreshResponse:
+    key = str(attempt)
+    session_id, user_id, name = child_codes.claim(database_target(), body.code.strip(), key, body.display_name,
+                                                 request.app.state.jwt_secret)
+    try:
+        tokens = child_session(request.app.state.auth_db_path, request.app.state.jwt_secret, session_id, user_id,
+                               name, key, request.headers.get("user-agent"), request.client.host if request.client else None)
+    except InvalidRefreshToken as error:
+        raise HTTPException(400, str(error)) from None
+    return signed_in_response(response, tokens)

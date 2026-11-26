@@ -34,7 +34,7 @@ from hashlib import sha256
 from redis.asyncio import Redis as AsyncRedis
 from redis.exceptions import RedisError
 
-from backend.shared.cache import CACHE_PREFIX, Breaker, sync_client
+from backend.shared.cache import CACHE_PREFIX, Breaker, live_redis_url, sync_client
 from backend.shared.database import DatabaseConnection, DatabaseTarget, database_error_types
 from backend.shared.demo_members import MEMBERS_BY_ID
 
@@ -75,7 +75,18 @@ def household_revision(db: DatabaseConnection, household_id: str) -> int:
 _listener: Callable[[str], None] | None = None
 
 
-def notify_changed(db: DatabaseConnection, household_id: str) -> None:
+def _database_namespace(db_path: DatabaseTarget) -> str:
+    return sha256(str(db_path).encode()).hexdigest()[:16]
+
+
+def _mark_dirty(redis, key: str, households: Iterable[str], ttl: int) -> None:
+    with redis.pipeline(transaction=False) as pipe:
+        pipe.sadd(key, *households)
+        pipe.expire(key, ttl)
+        pipe.execute()
+
+
+def notify_changed(db: DatabaseConnection, household_id: str, *, db_path: DatabaseTarget | None = None) -> None:
     """Mark a household as changed once the current transaction commits."""
     pending = getattr(db, "_live_changed", None)
     if pending is None:
@@ -88,6 +99,13 @@ def notify_changed(db: DatabaseConnection, household_id: str) -> None:
             if listener is not None:
                 for household in households:
                     listener(household)
+            elif db_path is not None:
+                # Auth redeems child invitations in a separate process. Wake the shopping worker.
+                key = f"familycart:{_database_namespace(db_path)}:dirty"
+                try:
+                    _mark_dirty(sync_client(live_redis_url()), key, households, int(sweep_interval() * 2))
+                except RedisError:
+                    logger.warning("Household notification delayed until the next database sweep")
 
         db.after_commit.append(flush)
     pending.add(household_id)
@@ -165,7 +183,7 @@ def build_snapshots(
     carts_by_id = {}
     for row in db.execute(
         f"""SELECT carts.household_id, carts.id, carts.name, carts.creator_id, carts.adults_only,
-                   carts.deleted, carts.next_cart_id, carts.creator_revoked
+                       carts.deleted, carts.next_cart_id, carts.creator_revoked, carts.inventory_store_id
             FROM carts
             WHERE carts.household_id IN ({marks}) ORDER BY carts.id""",
         present,
@@ -174,6 +192,7 @@ def build_snapshots(
             "id": row["id"], "name": row["name"], "creator_id": row["creator_id"],
             "adults_only": bool(row["adults_only"]), "deleted": bool(row["deleted"]),
             "creator_revoked": bool(row["creator_revoked"]), "next_cart_id": row["next_cart_id"], "grants": [],
+            "inventory_store_id": row["inventory_store_id"],
         }
         carts_by_id[row["id"]] = cart
         snapshots[row["household_id"]]["carts"].append(cart)
@@ -327,7 +346,7 @@ def viewer_role(snapshot: dict, user_id: str) -> bool:
 class LiveSync:
     def __init__(self, db_path: DatabaseTarget, redis_url: str, cache_url: str) -> None:
         self.db_path = db_path
-        namespace = sha256(str(db_path).encode()).hexdigest()[:16]
+        namespace = _database_namespace(db_path)
         self.namespace = f"familycart:{namespace}"
         self.dirty_key = f"{self.namespace}:dirty"
         self.cursor_key = f"{self.namespace}:list-cursor"
@@ -367,11 +386,7 @@ class LiveSync:
                 self._force_sweep = True
                 return
             try:
-                with self.redis.pipeline(transaction=False) as pipe:
-                    pipe.sadd(self.dirty_key, household_id)
-                    # Notes left by a worker that is gone expire; the database sweep covers them.
-                    pipe.expire(self.dirty_key, int(self.sweep_every * 2))
-                    pipe.execute()
+                _mark_dirty(self.redis, self.dirty_key, [household_id], int(self.sweep_every * 2))
             except RedisError as error:
                 self.breaker.failed(error)
                 self._force_sweep = True

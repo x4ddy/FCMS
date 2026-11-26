@@ -47,6 +47,8 @@ class StageTwoTests(unittest.TestCase):
         ))
         self.auth = self.enterContext(TestClient(auth_app))
         self.cart = self.enterContext(TestClient(familycart_app))
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE household_id = 'demo-household'")
         self.primary = self.sign_in("primary@example.test", "primary-demo-2026")
         self.child = self.sign_in("demo-child", "child-demo-2026")
 
@@ -63,6 +65,10 @@ class StageTwoTests(unittest.TestCase):
         return self.cart.put(
             f"{cart}/items/milk/contributions/me", headers=headers, json={"quantity": quantity}
         )
+
+    def assign_test_store(self, cart_id: str) -> None:
+        with closing(sqlite3.connect(self.db_path)) as db, db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (cart_id,))
 
     def test_saving_access_answers_with_the_saved_list(self) -> None:
         grants = f"{REGULAR}/grants"
@@ -113,6 +119,7 @@ class StageTwoTests(unittest.TestCase):
         created = self.cart.post(CARTS, headers=self.primary, json={"name": "  School snacks  "})
         self.assertEqual(created.status_code, 201)
         child_cart = f"{CARTS}/{created.json()['id']}"
+        self.assign_test_store(created.json()["id"])
         self.assertEqual(created.json()["name"], "School snacks")
         self.assertFalse(created.json()["adults_only"])
         self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
@@ -140,6 +147,7 @@ class StageTwoTests(unittest.TestCase):
     def test_primary_can_revoke_and_restore_creator_access(self) -> None:
         created = self.cart.post(CARTS, headers=self.primary, json={"name": "School snacks"}).json()
         cart_id = created["id"]
+        self.assign_test_store(cart_id)
         cart = f"{CARTS}/{cart_id}"
         grant = f"{cart}/grants/user-child"
         self.assertEqual(self.cart.put(grant, headers=self.primary).status_code, 200)
@@ -195,6 +203,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertTrue(created.json()["adults_only"])
         cart = f"{CARTS}/{created.json()['id']}"
+        self.assign_test_store(created.json()["id"])
         self.assertEqual(self.cart.get(cart, headers=self.child).status_code, 404)
         self.assertEqual(self.cart.put(f"{cart}/grants/user-child", headers=self.primary).status_code, 403)
         restricted_item = f"{cart}/items/cigarette-pack-20/contributions/me"
@@ -235,9 +244,12 @@ class StageTwoTests(unittest.TestCase):
             db.execute("DROP TABLE cart_item_contributions")
             db.execute("DROP TABLE cart_grants")
             db.execute("DROP INDEX IF EXISTS carts_household_id_idx")
+            db.execute("ALTER TABLE carts DROP COLUMN inventory_store_id")
             db.execute("UPDATE carts SET name = 'Existing name' WHERE id = 'regular-cart'")
         initialize_database(self.db_path)
         self.assertEqual(self.cart.get(REGULAR, headers=self.primary).json()["name"], "Existing name")
+        self.assertIsNone(self.cart.get(REGULAR, headers=self.primary).json()["inventory_store_id"])
+        self.assign_test_store("regular-cart")
         self.assertEqual(self.cart.put(CHILD_GRANT, headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(REGULAR, self.child, 4).status_code, 200)
         initialize_database(self.db_path)
@@ -292,6 +304,7 @@ class StageTwoTests(unittest.TestCase):
         self.assertEqual(self.cart.delete(REGULAR, headers=self.child).status_code, 403)
         created = self.cart.post(CARTS, headers=self.primary, json={"name": "Disposable cart"}).json()
         own_cart = f"{CARTS}/{created['id']}"
+        self.assign_test_store(created["id"])
         own_grant = f"{own_cart}/grants/user-child"
         self.assertEqual(self.cart.put(own_grant, headers=self.primary).status_code, 200)
         self.assertEqual(self.set_milk(own_cart, self.child, 4).status_code, 200)
@@ -312,15 +325,16 @@ class StageTwoTests(unittest.TestCase):
 
     def test_catalogue_items_can_be_added_and_removed_with_age_rules(self) -> None:
         products = self.cart.get("/api/v1/products", headers=self.primary).json()
-        self.assertEqual(len(products), 113)
-        self.assertEqual(len(self.cart.get("/api/v1/products", headers=self.child).json()), 112)
+        self.assertEqual(len(products), 50)
+        self.assertEqual(len(self.cart.get("/api/v1/products", headers=self.child).json()), 49)
         self.assertEqual(
             self.cart.get(
                 "/api/v1/products", params={"q": "cigarette"}, headers=self.child
             ).json(),
             [],
         )
-        restricted = next(product for product in products if product["min_age"] == 18)
+        restricted = next(product for product in products if product["sku"] == "cigarette-pack-20")
+        self.assertEqual(restricted["min_age"], 18)
         self.assertEqual(
             self.cart.get(
                 f"/api/v1/products/{restricted['sku']}", headers=self.child

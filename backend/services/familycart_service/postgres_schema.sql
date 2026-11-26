@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS carts (
     creator_id TEXT NOT NULL,
     name TEXT NOT NULL,
     adults_only SMALLINT NOT NULL CHECK (adults_only IN (0, 1)),
+    inventory_store_id TEXT,
     -- Deleted, or checked out and replaced by next_cart_id. Kept for old records.
     deleted SMALLINT NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
     next_cart_id TEXT,
@@ -41,6 +42,8 @@ CREATE TABLE IF NOT EXISTS household_invitations (
     id TEXT PRIMARY KEY,
     household_id TEXT NOT NULL REFERENCES households(id),
     token_hash TEXT NOT NULL UNIQUE,
+    child_user_id TEXT,
+    redemption_key_hash TEXT,
     invited_by TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     accepted_by TEXT,

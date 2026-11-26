@@ -20,6 +20,14 @@ class Identity:
     session_id: str | None = None
 
 
+# Google subjects and demo users occupy a separate namespace from locally issued child IDs.
+CHILD_ID_PREFIX = "child~"
+
+
+def is_child_account(user_id: str) -> bool:
+    return user_id.startswith(CHILD_ID_PREFIX)
+
+
 def load_jwt_secret() -> str:
     secret = os.environ.get("FAMILYCART_JWT_SECRET", "")
     if len(secret.encode("utf-8")) < 32:

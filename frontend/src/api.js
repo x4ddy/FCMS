@@ -101,6 +101,10 @@ export function retryAfterSeconds(value, now = Date.now()) {
   return Number.isNaN(date) ? 0 : Math.max(0, (date - now) / 1000)
 }
 
+export function childCodeRequestUnconfirmed(error) {
+  return error instanceof TypeError || error?.name === 'TimeoutError' || [502, 503, 504].includes(error?.status)
+}
+
 /** A readable message from an error response: plain text, {message}, or FastAPI's 422 validation list. */
 function errorMessage(detail, status) {
   if (typeof detail === 'string') return detail
@@ -118,6 +122,19 @@ export async function signInWithGoogle(credential, dateOfBirth) {
   const session = await request(`${api}/auth/google`, {
     method: 'POST', body: { credential, date_of_birth: dateOfBirth },
   })
+  publishAccessToken(session.access_token)
+  return session
+}
+
+export async function signInWithChildCode(code, displayName) {
+  // A lost response can be retried in this tab, including after a reload.
+  const storageKey = 'familycart:child-signin-attempt'
+  const key = sessionStorage.getItem(storageKey) || crypto.randomUUID()
+  sessionStorage.setItem(storageKey, key)
+  const session = await request(`${api}/auth/child`, {
+    method: 'POST', idempotencyKey: key, body: { code, display_name: displayName || undefined },
+  })
+  sessionStorage.removeItem(storageKey)
   publishAccessToken(session.access_token)
   return session
 }
@@ -195,6 +212,9 @@ export function accountApi(token) {
     }),
     ...listApi(token, `${api}/my-lists`),
     products: () => request(`${api}/products`, { token }),
+    saveUsername: (displayName, owner) => request(`${api}/auth/profile`, {
+      token, owner, method: 'PATCH', body: { display_name: displayName },
+    }),
     saveAge: (dateOfBirth) => request(`${api}/auth/age`, {
       token, method: 'POST', body: { date_of_birth: dateOfBirth },
     }),
@@ -226,10 +246,30 @@ export function householdApi(token, householdId) {
     cart: (id, pending = []) => request(
       pending.length > 0 ? `${cartPath(id)}?${new URLSearchParams({ pending })}` : cartPath(id), { token },
     ),
-    // Opens checkout, or keeps it open, and returns the cart as it is now.
-    startCheckout: (id) => request(`${cartPath(id)}/checkout`, { token, method: 'POST' }),
+    cartInventory: (id, signal) => request(`${cartPath(id)}/inventory`, { token, signal }),
+    setCartStore: (id, addressId) => request(`${cartPath(id)}/inventory-store`, {
+      token, method: 'PUT', body: { kind: 'household', address_id: addressId },
+    }),
+    startCheckout: async (id, idempotencyKey, owner) => {
+      const send = () => request(`${cartPath(id)}/checkout`, {
+        token, owner, method: 'POST', idempotencyKey, signal: AbortSignal.timeout(REFRESH_TIMEOUT),
+      })
+      try {
+        return await send()
+      } catch (error) {
+        if (error.status && ![408, 500, 502, 503, 504].includes(error.status)) throw error
+        const delay = Math.max(250 + Math.random() * 350, (error.retryAfter || 0) * 1000)
+        await new Promise((resolve) => setTimeout(resolve, delay))
+        return send()
+      }
+    },
+    renewCheckout: (id, idempotencyKey, owner) => request(`${cartPath(id)}/checkout?renew=true`, {
+      token, owner, method: 'POST', idempotencyKey, signal: AbortSignal.timeout(REFRESH_TIMEOUT),
+    }),
     // keepalive lets this finish while the page is closing.
-    leaveCheckout: (id) => request(`${cartPath(id)}/checkout`, { token, method: 'DELETE', keepalive: true }),
+    leaveCheckout: (id, idempotencyKey, owner) => request(`${cartPath(id)}/checkout`, {
+      token, owner, method: 'DELETE', idempotencyKey, keepalive: true,
+    }),
     leave: () => request(`${household}/leave`, { token, method: 'POST' }),
     deleteHousehold: () => request(household, { token, method: 'DELETE' }),
     memberRequests: () => request(`${household}/member-requests`, { token }),
@@ -244,6 +284,19 @@ export function householdApi(token, householdId) {
       `${household}/members/${encodeURIComponent(memberId)}/primary`, { token, method: 'PUT' },
     ),
     revokeMember: (id) => request(`${household}/members/${encodeURIComponent(id)}`, { token, method: 'DELETE' }),
+    createChildCode: async (memberId, idempotencyKey) => {
+      const owner = tokenOwner(token)
+      const send = () => request(`${household}/child-codes`, {
+        token, owner, method: 'POST', body: { member_id: memberId }, idempotencyKey, signal: AbortSignal.timeout(REFRESH_TIMEOUT),
+      })
+      try {
+        return await send()
+      } catch (error) {
+        if (!childCodeRequestUnconfirmed(error) || error.retryAfter > 5) throw error
+        await new Promise((resolve) => setTimeout(resolve, Math.max(500, (error.retryAfter || 0) * 1000)))
+        return send()
+      }
+    },
     createInvitation: () => request(`${household}/invitations`, { token, method: 'POST' }),
     grants: (id) => request(`${cartPath(id)}/grants?include_creator=true`, { token }),
     changeGrant: (id, member, grant) => request(`${cartPath(id)}/grants/${encodeURIComponent(member)}`, {

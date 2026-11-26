@@ -8,6 +8,9 @@ export const money = (fils) => currency.format(fils / 100)
 const paths = {
   search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm5 12 4 4',
   cart: 'M3 4h2l2.4 11h10.2L20 7H6M9 20h.01M17 20h.01',
+  card: 'M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Zm-2 5h18m-14 5h4',
+  wallet: 'M20 9V6a2 2 0 0 0-2-2H6a3 3 0 0 0 0 6h14m-17-3v10a3 3 0 0 0 3 3h14v-4m-4 0a3 3 0 0 1 0-6h6v6Zm1-3h.01',
+  cash: 'M3 6h18v12H3zM7 6a4 4 0 0 1-4 4m14-4a4 4 0 0 0 4 4M7 18a4 4 0 0 0-4-4m14 4a4 4 0 0 1 4-4m-7-2a2 2 0 1 1-4 0 2 2 0 0 1 4 0Z',
   pin: 'M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11Zm0-8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z',
   home: 'M4 11l8-7 8 7v9h-5v-6H9v6H4z',
   list: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
@@ -22,6 +25,12 @@ const paths = {
   check: 'M5 12.5l4.5 4.5L19 7.5',
   heart: 'M12 20s-7.5-4.6-9-9.3C2 7.4 4.2 5 7 5c2 0 3.8 1.1 5 3 1.2-1.9 3-3 5-3 2.8 0 5 2.4 4 5.7C19.5 15.4 12 20 12 20Z',
   lock: 'M6 11h12v9H6zM9 11V8a3 3 0 0 1 6 0v3',
+  grid: 'M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM4 20a8 6 0 0 1 16 0',
+  logout: 'M10 4H5v16h5m4-12 4 4-4 4m-5-4h12',
+  right: 'm9 6 6 6-6 6',
+  arrow: 'M4 12h15m-6-6 6 6-6 6',
+  back: 'M20 12H5m6-6-6 6 6 6',
 }
 
 export function Icon({ name, size = 20 }) {
@@ -34,6 +43,10 @@ export function Avatar({ id, name, size = 'small' }) {
     style={{ '--hue': avatarHue(id) }}>{initials(name)}</span>
 }
 
+export function IconTile({ name, size = 22 }) {
+  return <span className="icon-tile"><Icon name={name} size={size} /></span>
+}
+
 /** A product picture that falls back to a letter when the image cannot load. */
 export function ProductImage({ product, className = '' }) {
   const [failed, setFailed] = useState(null)
@@ -44,15 +57,17 @@ export function ProductImage({ product, className = '' }) {
     onError={() => setFailed(product.image_url)} />
 }
 
-/** − n + with large targets. While a change is not confirmed yet, a spinner takes the number's place. */
-export function Stepper({ label, quantity, onAdjust, disabled, canRemove = true, removeHint, busy = false }) {
+/** Keep the optimistic quantity visible until the server confirms it. */
+export function Stepper({ label, quantity, onAdjust, disabled, canRemove = true, remainingStock, removeHint, busy = false }) {
+  const atStockLimit = remainingStock != null && remainingStock <= 0
   return <span className="stepper" role="group" aria-busy={busy} aria-label={`Quantity for ${label}`}>
     <button type="button" aria-label={`Remove one ${label}`} disabled={disabled || quantity < 1 || !canRemove}
       title={canRemove ? undefined : removeHint} onClick={() => onAdjust(-1)}><Icon name="minus" size={16} /></button>
-    <span className="stepper-quantity">{busy
-      ? <><i className="stepper-spinner" aria-hidden="true" /><span className="visually-hidden">{quantity}</span></>
-      : <strong key={quantity}>{quantity}</strong>}</span>
-    <button type="button" aria-label={`Add one ${label}`} disabled={disabled || quantity >= 99}
+    <span className="stepper-quantity"><strong>{quantity}</strong>
+      {busy && <i className="stepper-spinner" aria-hidden="true" />}</span>
+    <button type="button" aria-label={atStockLimit ? `Stock limit reached for ${label}` : `Add one ${label}`}
+      className={atStockLimit ? 'stock-limited' : undefined} disabled={disabled || remainingStock == null || (!atStockLimit && quantity >= 99)}
+      title={atStockLimit ? 'Out of stock' : remainingStock == null ? 'Delivery stock is unavailable' : undefined}
       onClick={() => onAdjust(1)}><Icon name="plus" size={16} /></button>
   </span>
 }
@@ -109,7 +124,7 @@ export function Dropdown({ label, value, options, onChange, icon, up = false, cl
       aria-controls={`${id}-list`} aria-label={`${label}: ${current?.label ?? ''}`} aria-activedescendant={open ? `${id}-${active}` : undefined}
       onClick={() => open ? setOpen(false) : show()}>
       {(current?.icon ?? icon) && <Icon name={current?.icon ?? icon} size={18} />}
-      <span className="dropdown-text">{current?.label}</span><Icon name="chevron" size={16} />
+      <span className="dropdown-label">{current?.label}</span><Icon name="chevron" size={16} />
     </button>
     {open && <ul className={`dropdown-menu${up ? ' up' : ''}`} id={`${id}-list`} role="listbox" aria-label={label}>
       {options.map((option, index) => <li key={option.value} id={`${id}-${index}`} role="option" aria-selected={option.value === value}

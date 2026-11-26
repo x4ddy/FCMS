@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { connectLists, refreshAccessToken } from './api.js'
 import { newKey } from './cartQueue.js'
+import { cartQuantities, combined } from './cartState.js'
 import { isUnconfirmed } from './checkoutState.js'
-import { Avatar, confirmAction, Dropdown, Icon, ProductImage } from './ui.jsx'
+import { Avatar, confirmAction, Dropdown, Icon, IconTile, ProductImage } from './ui.jsx'
 import {
   applyChanges, cartReadyItems, changesBody, chosenForCart, emptyChanges, groupListItems, hasChanges, mergeListUpdate, parsePastedList, parseQuickAdd,
   productSuggestions, queueAdd, queueRemove, queueSet, timeAgo, upsertListSummary,
@@ -13,8 +14,8 @@ const LIST_IDEAS = ['Weekly groceries', 'Weekend BBQ', 'Pharmacy run', 'School l
 
 function ProgressBar({ done, total }) {
   const percent = total === 0 ? 0 : Math.round(done / total * 100)
-  return <div className="list-progress" role="progressbar" aria-valuemin={0} aria-valuemax={total}
-    aria-valuenow={done} aria-label={`${done} of ${total} items done`}>
+  return <div className="list-progress" role="progressbar" aria-valuenow={percent}
+    aria-label="List progress" aria-valuetext={`${done} of ${total} items done`}>
     <span style={{ width: `${percent}%` }} />
   </div>
 }
@@ -23,59 +24,66 @@ function ProgressBar({ done, total }) {
 /* Overview                                                                 */
 /* ------------------------------------------------------------------------ */
 
-function ListsOverview({ mine, lists, loading, busy, onCreate, onOpen }) {
+function ListsOverview({ mine, lists, loading, busy, onCreate, onOpen, sort, onSort }) {
   const [name, setName] = useState('')
+  const nameInput = useRef(null)
+  const sorted = [...lists].sort(sort === 'name'
+    ? (a, b) => a.name.localeCompare(b.name)
+    : (a, b) => b.updated_at.localeCompare(a.updated_at))
   const create = (value) => {
     const trimmed = value.trim()
-    if (trimmed) { onCreate(trimmed); setName('') }
+    if (trimmed && !busy) onCreate(trimmed)
   }
   return (
     <>
       <form className="panel new-list" onSubmit={(event) => { event.preventDefault(); create(name) }}>
-        <label htmlFor="new-list-name">Start a new list</label>
+        <h2>Create a new list</h2>
         <div className="new-list-row">
-          <input id="new-list-name" placeholder="e.g. Weekly groceries" maxLength="80" value={name}
+          <input aria-label="New list name" ref={nameInput} placeholder="e.g. Weekly groceries, Weekend BBQ…" maxLength="80" value={name}
             onChange={(event) => setName(event.target.value)} />
           <button disabled={busy || !name.trim()}>Create list</button>
         </div>
         <div className="list-ideas" aria-label="Suggested list names">
+          <small className="muted">Quick suggestions</small>
           {LIST_IDEAS.map((idea) => <button type="button" key={idea} className="chip" disabled={busy}
-            onClick={() => create(idea)}>+ {idea}</button>)}
+            onClick={() => { setName(idea); nameInput.current?.focus() }}><Icon name="plus" size={14} /> {idea}</button>)}
         </div>
       </form>
 
+      <div className="section-head list-overview-heading">
+        <div><h2>{mine ? 'Your lists' : 'Shared lists'}</h2>
+          {!loading && <small className="muted">{lists.length} {lists.length === 1 ? 'list' : 'lists'}</small>}</div>
+        {!loading && lists.length > 1 && <select aria-label="Sort lists" value={sort} onChange={(event) => onSort(event.target.value)}>
+          <option value="recent">Recently updated</option><option value="name">Name A–Z</option>
+        </select>}
+      </div>
       {loading ? <div className="list-grid" aria-busy="true">
         {[0, 1, 2].map((key) => <div className="list-card skeleton" key={key} />)}
       </div> : lists.length === 0 ? (
-        <div className="list-empty">
-          <span aria-hidden="true">📝</span>
-          <h2>No lists yet</h2>
-          <p>{mine
-            ? 'These lists are private to you. Nobody in your household can see them.'
-            : 'Household lists are shared with everyone in your household.'} Jot things down as you think of them,
-            then select items and add them to a household cart.</p>
+        <div className="list-empty panel">
+          <IconTile name="list" size={26} />
+          <h3>No lists yet</h3>
+          <p>Create a list to plan what you need and move selected items to a cart.</p>
         </div>
       ) : (
         <ul className="list-grid">
-          {lists.map((list) => {
-            const remaining = list.item_count - list.checked_count
-            return <li key={list.id}>
+          {sorted.map((list) => <li key={list.id}>
               <button className="list-card" onClick={() => onOpen(list.id)}>
                 <span className="list-card-top">
-                  <strong>{list.name}</strong>
-                  <Avatar id={list.created_by} name={list.created_by_name} />
+                  <IconTile name={mine ? 'list' : 'people'} />
+                  <span><strong>{list.name}</strong>
+                    <small className="muted">{list.item_count} {list.item_count === 1 ? 'item' : 'items'} · {mine ? 'Private' : 'Shared'}</small></span>
+                  {!mine && <Avatar id={list.created_by} name={list.created_by_name} />}
+                  <Icon name="right" size={16} />
                 </span>
                 <span className="list-card-count">
-                  {list.item_count === 0 ? 'Empty list'
-                    : remaining === 0 ? 'All done 🎉'
-                      : `${remaining} to get`}
-                  {list.checked_count > 0 && remaining > 0 && <small> · {list.checked_count} done</small>}
+                  {list.item_count === 0 ? 'Empty list' : list.checked_count === list.item_count
+                    ? 'All done' : `${list.checked_count} of ${list.item_count} done`}
                 </span>
                 <ProgressBar done={list.checked_count} total={list.item_count} />
                 <small>Updated {timeAgo(list.updated_at)}</small>
               </button>
-            </li>
-          })}
+            </li>)}
         </ul>
       )}
     </>
@@ -264,15 +272,32 @@ function ListItemRow({ item, product, chosen, onChoose, onToggle, onQuantity, on
 function ListDetail({
   mine, list, products, productsBySku, categoryOrder, carts, defaultCartId, busy,
   onBack, onRename, onDelete, onAddProduct, onAddCustom, onAddMany, onUpdateItem, onDeleteItem, onClearDone, onMove,
+  cartApi, onConfigureCart,
 }) {
   const [renaming, setRenaming] = useState(false)
   const [name, setName] = useState(list.name)
   const [showDone, setShowDone] = useState(false)
   const [target, setTarget] = useState(defaultCartId ?? carts[0]?.id ?? '')
+  const [targetInventory, setTargetInventory] = useState(null)
+  const [stockVersion, setStockVersion] = useState(0)
+  const targetCart = carts.find((cart) => cart.id === target)
+  const storeId = targetCart?.inventory_store_id
   useEffect(() => { if (!renaming) setName(list.name) }, [list.name, renaming])
   useEffect(() => {
     if (!carts.some((cart) => cart.id === target)) setTarget(defaultCartId ?? carts[0]?.id ?? '')
   }, [carts, defaultCartId, target])
+  useEffect(() => {
+    if (!cartApi || !storeId) return
+    const controller = new AbortController()
+    Promise.all([cartApi.cartInventory(target, controller.signal), cartApi.cart(target)]).then(([inventory, cart]) => {
+      if (!controller.signal.aborted && inventory.store_id === storeId && cart.inventory_store_id === storeId) {
+        setTargetInventory({ target, storeId, stock: inventory.stock, quantities: cartQuantities(combined(cart)) })
+      }
+    }).catch(() => {
+      if (!controller.signal.aborted) setTargetInventory(null)
+    })
+    return () => controller.abort()
+  }, [cartApi, target, storeId, stockVersion])
 
   const { groups, done } = useMemo(
     () => groupListItems(list.items, productsBySku, categoryOrder), [list.items, productsBySku, categoryOrder],
@@ -281,6 +306,10 @@ function ListDetail({
   // Only items the user chose are sent. Nothing is chosen to begin with.
   const [chosenIds, setChosenIds] = useState(() => new Set())
   const chosen = useMemo(() => chosenForCart(ready, chosenIds, productsBySku), [ready, chosenIds, productsBySku])
+  const stock = targetInventory?.target === target && targetInventory.storeId === storeId ? targetInventory : null
+  const requested = cartQuantities(chosen.items)
+  const limited = stock && Object.entries(requested).some(([sku, quantity]) =>
+    quantity + (stock.quantities[sku] ?? 0) > (stock.stock[sku] ?? 0))
   const isChosen = (item) => chosen.items.some((other) => other.id === item.id)
   const canSend = carts.length > 0
   const toggleChosen = (id) => setChosenIds((current) => {
@@ -300,7 +329,7 @@ function ListDetail({
   return (
     <section className="list-detail">
       <div className="list-detail-head">
-        <button className="text-button" onClick={onBack}>← All lists</button>
+        <button className="text-button" onClick={onBack}><Icon name="back" size={16} /> All lists</button>
         <div className="list-title-row">
           {renaming ? (
             <input className="title-input" autoFocus maxLength="80" value={name} aria-label="List name"
@@ -383,11 +412,21 @@ function ListDetail({
         <div className="move-target">
           <span>Send to</span>
           <Dropdown up label="Send to" value={target} icon="cart" onChange={setTarget}
-            options={carts.map((cart) => ({ value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart', note: cart.adults_only ? 'Adults only' : '' }))} />
+            options={carts.map((cart) => ({
+              value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart',
+              note: cart.inventory_store_name ?? 'Delivery location required',
+            }))} />
+          {targetCart && !storeId && (targetCart.can_checkout
+            ? <button className="text-button" onClick={() => onConfigureCart(target)}>Set delivery</button>
+            : <small>An eligible adult needs to set delivery.</small>)}
+          {limited && <small role="status">Some selected products exceed stock at {targetCart.inventory_store_name}.</small>}
         </div>
-        <button disabled={busy || !target || chosen.items.length === 0} onClick={() => {
-          onMove(target, chosen.items.map((item) => item.id))
-          setChosenIds(new Set())
+        <button disabled={busy || !storeId || chosen.items.length === 0} onClick={async () => {
+          const result = await onMove(target, chosen.items.map((item) => item.id))
+          if (result) {
+            setChosenIds((ids) => new Set([...ids].filter((id) => !result.moved.includes(id))))
+            setStockVersion((version) => version + 1)
+          }
         }}>
           Add {chosen.items.length || ''} to cart →
         </button>
@@ -407,23 +446,25 @@ export function ListsPage({ account, api, household, onBack, ...rest }) {
   const tabs = [['mine', 'My lists'], ['household', 'Household lists']]
   return (
     <div className="shopping-lists-page page">
-      <div className="list-tabs" role="tablist" aria-label="Which lists">
-        {tabs.map(([id, label]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>)}
+      <div className="list-tabs" role="group" aria-label="Which lists">
+        {tabs.map(([id, label]) => <button key={id} aria-pressed={tab === id} onClick={() => setTab(id)}>{label}</button>)}
       </div>
       {tab === 'household' && !household ? <div className="list-empty">
         <span aria-hidden="true">🏠</span>
         <h2>No household yet</h2>
         <p>Create or join a household to share lists with your family. Your own lists are under My lists.</p>
       </div> : <ShoppingLists key={shared ? `household-${household.id}` : 'mine'} {...rest} mine={!shared}
-        api={shared ? api : account} household={household} onBack={onBack} />}
+        api={shared ? api : account} cartApi={api} household={household} onBack={onBack} />}
     </div>
   )
 }
 
 function ShoppingLists({
   mine, api, token, household, user, products, carts, defaultCartId, onNotify, onCartChanged, onAccessLost, onBack,
+  cartApi, onConfigureCart,
 }) {
   const [lists, setLists] = useState([])
+  const [sort, setSort] = useState('recent')
   const [loading, setLoading] = useState(true)
   const [openId, setOpenId] = useState(null)
   const [detail, setDetail] = useState(null)
@@ -667,7 +708,7 @@ function ShoppingLists({
       </div>}
 
       {!openId ? (
-        <ListsOverview mine={mine} lists={lists} loading={loading} busy={busy} onOpen={openList}
+        <ListsOverview mine={mine} lists={lists} loading={loading} busy={busy} onOpen={openList} sort={sort} onSort={setSort}
           onCreate={(name) => run(async () => {
             const created = await api.createList(name)
             setOpenId(created.id); setDetail(created)
@@ -678,6 +719,7 @@ function ShoppingLists({
       ) : (
         <ListDetail key={detail.id} mine={mine} list={detail} products={products} productsBySku={productsBySku} categoryOrder={categoryOrder}
           carts={carts} defaultCartId={defaultCartId} busy={busy} onBack={back}
+          cartApi={cartApi} onConfigureCart={onConfigureCart}
           onRename={(name) => run(async () => {
             if (await sendQueue()) setDetail(await saving(() => api.renameList(detail.id, name)))
           })}
@@ -712,13 +754,16 @@ function ShoppingLists({
             }
             moveAttempt.current = null
             const cartName = carts.find((cart) => cart.id === cartId)?.name ?? 'the cart'
-            if (result.moved.length > 0) {
-              notify(`Added ${result.moved.length} ${result.moved.length === 1 ? 'product' : 'products'} to ${cartName}.`)
-              onCartChanged(cartId)
-            }
-            const reasons = [...new Set(result.skipped.map((skip) => skip.reason))]
+            if (result.moved.length > 0) notify(`Added ${result.moved.length} ${result.moved.length === 1 ? 'product' : 'products'} to ${cartName}.`)
+            onCartChanged(cartId)
+            const reasons = result.skipped.map((skip) => {
+              const row = detail.items.find((item) => item.id === skip.id)
+              const name = productsBySku.get(row?.sku)?.name ?? row?.custom_name
+              return name ? `${name} (${skip.reason})` : skip.reason
+            })
             if (reasons.length > 0) notify(`${result.skipped.length} not added: ${reasons.join('; ')}`, 'error')
             await refreshDetail()
+            return result
           })} />
       )}
     </section>

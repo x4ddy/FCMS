@@ -37,6 +37,7 @@ class SessionTokens:
     display_name: str
     is_adult: bool
     age_setup_required: bool
+    email: str | None = None
 
 
 def _hash_token(session_id: str, secret_part: str, signing_secret: str) -> str:
@@ -64,6 +65,41 @@ def refresh_session_id(token: str, signing_secret: str) -> str:
     return _parse_refresh_token(token, signing_secret)[0]
 
 
+def _insert_session(database, session_id, user_id, token_hash, now, user_agent, ip_address, *, replay=False):
+    conflict = " ON CONFLICT (session_id) DO NOTHING" if replay else ""
+    return database.execute(
+        """INSERT INTO refresh_sessions
+           (session_id, user_id, token_hash, expires_at, absolute_expires_at,
+            created_at, last_used_at, revoked_at, user_agent, ip_address)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""" + conflict,
+        (session_id, user_id, token_hash, (now + REFRESH_TOKEN_LIFETIME).isoformat(),
+         (now + REFRESH_FAMILY_LIFETIME).isoformat(), now.isoformat(), now.isoformat(), user_agent, ip_address),
+    )
+
+
+def child_session(path, signing_secret, session_id, user_id, display_name, attempt_key, user_agent, ip_address):
+    """One identity session per invitation, even if the first HTTP response was lost."""
+    now = datetime.now(timezone.utc)
+    secret_part = hmac.new(signing_secret.encode(), f"child-login:{session_id}:{attempt_key}".encode(),
+                           hashlib.sha256).hexdigest()
+    token_hash = _hash_token(session_id, secret_part, signing_secret)
+    with transaction(path) as db:
+        db.execute("""INSERT INTO users (user_id, display_name, is_adult, status, created_at, updated_at)
+                      VALUES (?, ?, 0, 'ACTIVE', ?, ?) ON CONFLICT (user_id) DO NOTHING""",
+                   (user_id, display_name, now.isoformat(), now.isoformat()))
+        _insert_session(db, session_id, user_id, token_hash, now, user_agent, ip_address, replay=True)
+        lock = " FOR UPDATE" if db.dialect == "postgresql" else ""
+        row = db.execute("""SELECT u.display_name, u.status, u.is_adult, s.token_hash, s.revoked_at
+                            FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
+                            WHERE s.session_id = ? AND u.user_id = ?""" + lock, (session_id, user_id)).fetchone()
+        if (not row or row["status"] != "ACTIVE" or row["is_adult"] or row["revoked_at"]
+                or not hmac.compare_digest(row["token_hash"], token_hash)):
+            raise InvalidRefreshToken("This child code has already been used")
+    identity = Identity(user_id, False, session_id)
+    return SessionTokens(issue_token(identity, signing_secret), f"{session_id}.{secret_part}",
+                         int(ACCESS_TOKEN_LIFETIME.total_seconds()), user_id, row["display_name"], False, False)
+
+
 def create_session(
     path: DatabaseTarget,
     signing_secret: str,
@@ -89,30 +125,14 @@ def create_session(
             database, identity.user_id, display_name, identity.is_adult, now.isoformat(),
             email, google_subject, date_of_birth,
         )
-        database.execute(
-            """INSERT INTO refresh_sessions
-               (session_id, user_id, token_hash, expires_at, absolute_expires_at,
-                created_at, last_used_at, revoked_at, user_agent, ip_address)
-               VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
-            (
-                session_id,
-                identity.user_id,
-                token_hash,
-                (now + REFRESH_TOKEN_LIFETIME).isoformat(),
-                (now + REFRESH_FAMILY_LIFETIME).isoformat(),
-                now.isoformat(),
-                now.isoformat(),
-                user_agent,
-                ip_address,
-            ),
-        )
+        _insert_session(database, session_id, identity.user_id, token_hash, now, user_agent, ip_address)
     access_identity = Identity(identity.user_id, bool(profile["is_adult"]), session_id)
     return SessionTokens(
         issue_token(access_identity, signing_secret),
         refresh_token,
         int(ACCESS_TOKEN_LIFETIME.total_seconds()),
         identity.user_id,
-        display_name,
+        profile["display_name"],
         access_identity.is_adult,
         bool(profile["age_setup_required"]),
     )
@@ -123,7 +143,7 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
     now = datetime.now(timezone.utc)
     with transaction(path) as database:
         session_query = (
-            """SELECT s.*, u.display_name, u.is_adult, u.status,
+            """SELECT s.*, u.display_name, u.is_adult, u.status, u.email,
                       u.google_subject IS NOT NULL AND u.date_of_birth IS NULL AS age_setup_required
                FROM refresh_sessions s JOIN users u ON u.user_id = s.user_id
                WHERE s.session_id = ?"""
@@ -180,6 +200,7 @@ def rotate_session(path: DatabaseTarget, signing_secret: str, presented_token: s
         session["display_name"],
         identity.is_adult,
         bool(session["age_setup_required"]),
+        session["email"],
     )
 
 

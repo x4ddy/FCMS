@@ -9,6 +9,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.services.familycart_service.app import app, live_view
+from backend.services.familycart_service.db import transaction
 from backend.shared.tokens import Identity, issue_token
 
 HOME = {"label": "Home", "recipient_name": "R", "address_line1": "1 Street", "city": "Dubai",
@@ -40,6 +41,8 @@ class HouseholdAccountTests(unittest.TestCase):
         household = created.json()
         root = f"/api/v1/households/{household['id']}"
         [shared_cart] = self.client.get(f"{root}/carts", headers=primary).json()
+        with transaction(self.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (shared_cart["id"],))
 
         invitation = self.client.post(f"{root}/invitations", headers=primary).json()
         accepted = self.client.post("/api/v1/household-invitations/accept", headers=member, json={
@@ -141,6 +144,8 @@ class HouseholdAccountTests(unittest.TestCase):
         })
         self.assertEqual(accepted.status_code, 200)
         [cart] = self.client.get(f"{root}/carts", headers=primary).json()
+        with transaction(self.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (cart["id"],))
         cart_path = f"{root}/carts/{cart['id']}"
         item_path = f"{cart_path}/items/milk"
         self.assertEqual(self.client.patch(item_path, headers=successor, json={"delta": 1}).status_code, 200)

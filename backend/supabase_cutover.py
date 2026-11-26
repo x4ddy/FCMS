@@ -33,8 +33,8 @@ STORES = {
 }
 
 # Columns added after the baseline. Missing ones mean a migration has not been applied.
-ADDED_COLUMNS = {"cart_sync_events": ["reason", "request_id"], "households": ["admin_id"],
-                 "household_members": ["age_status", "display_name"], "carts": ["next_cart_id", "live_revision"]}
+ADDED_COLUMNS = {"household_invitations": ["child_user_id", "redemption_key_hash"], "cart_sync_events": ["reason", "request_id"], "households": ["admin_id"],
+                 "household_members": ["age_status", "display_name"], "carts": ["next_cart_id", "live_revision", "inventory_store_id"]}
 # Columns an unreleased build left in some local databases. Nothing reads them.
 RETIRED_COLUMNS = {"household_addresses": {"source_address_id"}}
 

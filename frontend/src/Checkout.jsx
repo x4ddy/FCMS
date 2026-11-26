@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react'
-import { Avatar, Icon, money, ProductImage } from './ui.jsx'
+import { Dropdown, Icon, money, ProductImage } from './ui.jsx'
 
 const problems = {
   ADDRESS_NEEDS_PIN: 'This address needs a map pin.',
@@ -7,6 +7,11 @@ const problems = {
   MAPS_UNAVAILABLE: 'Coverage is temporarily unavailable for this address.',
 }
 const distinctAddress = ({ kind, address_id }) => `${kind}:${address_id}`
+const paymentMethods = [
+  { value: 'card', label: 'Credit or debit card', icon: 'card' },
+  { value: 'wallet', label: 'Mobile wallet', icon: 'wallet' },
+  { value: 'cash', label: 'Cash on delivery', icon: 'cash' },
+]
 
 export function DeliveryGroups({ groups, shortages = [], products = new Map() }) {
   return <div className="deliveries">
@@ -61,26 +66,23 @@ export function OrderConfirmation({ order, error, products, onBack, onShop }) {
 }
 
 export function Checkout({
-  account, cart, rows, changes, waiting, user, names, products, addresses, allowed, isAdult, editor, pending, onPlace, onOpenOrder,
+  account, cart, rows, changes, waiting, products, addresses, allowed, isAdult, editor, pending, onPlace, onOpenOrder,
+  preferredAddress, onStockConflict, onBackToCart,
 }) {
   const [chosenAddress, setChosenAddress] = useState('')
-  const [split, setSplit] = useState(false)
-  const [overrides, setOverrides] = useState({})
   const [editing, setEditing] = useState(false)
   const [quote, setQuote] = useState(null)
   const [reviewError, setReviewError] = useState(null)
+  const [paymentMethod, setPaymentMethod] = useState(paymentMethods[0].value)
   const [decline, setDecline] = useState(false)
   const [busy, setBusy] = useState(false)
   const action = useRef(false)
   // The choice made in the cart. Live updates must not change what is being ordered.
   const [order, setOrder] = useState(() => rows)
 
-  const addressIndex = new Map(addresses.map((address) => [distinctAddress(address), address]))
-  const defaultAddress = addressIndex.get(chosenAddress) || addresses.find((address) => address.pinned) || addresses[0]
-  const contributors = new Map()
-  for (const row of order) for (const item of row.people) {
-    contributors.set(item.contributor_id, [...contributors.get(item.contributor_id) ?? [], `${item.quantity} × ${row.product.name}`])
-  }
+  const deliveryAddress = addresses.find((address) => distinctAddress(address) === chosenAddress)
+    || addresses.find((address) => address.id === preferredAddress && address.pinned)
+    || addresses.find((address) => address.pinned) || addresses[0]
   const total = order.reduce((sum, row) => sum + row.product.price_fils * row.quantity, 0)
 
   async function run(callback) {
@@ -91,10 +93,11 @@ export function Checkout({
     try { await callback() }
     catch (error) {
       if (['QUOTE_STALE', 'QUOTE_EXPIRED', 'QUOTE_ALREADY_USED', 'QUOTE_NOT_FOUND', 'SELECTION_CHANGED',
-        'OUT_OF_STOCK', 'CHECKOUT_FORBIDDEN', 'AGE_ELIGIBILITY_REQUIRED'].includes(error.code)) {
+        'OUT_OF_STOCK', 'CART_STORE_MISMATCH', 'CART_STORE_REQUIRED', 'CHECKOUT_FORBIDDEN', 'AGE_ELIGIBILITY_REQUIRED'].includes(error.code)) {
         setQuote(null)
         setOrder(rows)
       }
+      if (error.code === 'OUT_OF_STOCK') onStockConflict()
       if (error.code === 'MOCK_PAYMENT_DECLINED') setDecline(false)
       setReviewError(error)
     } finally {
@@ -111,25 +114,22 @@ export function Checkout({
 
   function review() {
     return run(async () => {
-      const reference = ({ kind, address_id }) => ({ kind, address_id })
-      const submitted = !split ? [] : [...contributors.keys()].flatMap((id) => {
-        const address = addressIndex.get(overrides[id])
-        return address ? [{ contributor_id: id, address: reference(address) }] : []
-      })
+      const { kind, address_id } = deliveryAddress
       setQuote(null)
       setQuote(await account.quote({
-        cart, default_address: reference(defaultAddress), overrides: submitted, skus: order.map((row) => row.sku),
+        cart, default_address: { kind, address_id }, skus: order.map((row) => row.sku),
       }))
     })
   }
 
-  const option = (address) => <option value={distinctAddress(address)} key={distinctAddress(address)}>
-    {address.label} · {address.city}{address.owner ? ` (${address.owner})` : ''}{address.pinned ? '' : ' · needs pin'}
-  </option>
   const message = reviewError && <div className="notice error" role="alert">
     {reviewError.status ? reviewError.message : 'Connection interrupted. Retry to check the result.'}
     {reviewError.detail?.order_id && <button className="secondary" onClick={() => onOpenOrder(reviewError.detail.order_id)}>
       Open existing confirmation</button>}
+    {['OUT_OF_STOCK', 'CART_STORE_MISMATCH', 'CART_STORE_REQUIRED'].includes(reviewError.code) &&
+      <button className="secondary" onClick={onBackToCart}>
+        {reviewError.code === 'OUT_OF_STOCK' ? 'Edit cart quantities' : 'Set delivery in cart'}
+      </button>}
   </div>
   const failedGroups = reviewError?.detail?.delivery_groups
 
@@ -181,33 +181,26 @@ export function Checkout({
             {addresses.map((address) => {
               const key = distinctAddress(address)
               return <label key={key} className="address-choice"><input type="radio" name="delivery" disabled={busy}
-                checked={defaultAddress && distinctAddress(defaultAddress) === key}
+                checked={distinctAddress(deliveryAddress) === key}
                 onChange={() => { setChosenAddress(key); clearReview() }} />
                 <span><strong>{address.label}{address.owner ? ` · ${address.owner}` : ''}</strong>
                   <small className="muted">{address.address_line1}, {address.city}{address.pinned ? '' : ' · needs a map pin'}</small></span></label>
             })}
           </div>
-          {contributors.size > 1 && <label className="checkbox-label"><input type="checkbox" checked={split} disabled={busy}
-            onChange={(event) => { setSplit(event.target.checked); clearReview() }} /> Split delivery by who added the items</label>}
-          {split && [...contributors].map(([id, items]) => {
-            const name = id === user.id ? 'You' : names.get(id) ?? 'Member'
-            return <label key={id} className="split-row">
-              <span className="person"><Avatar id={id} name={name} />{name}<small className="muted">{items.join(', ')}</small></span>
-              <select aria-label={`Delivery address for ${name}`} value={addressIndex.has(overrides[id]) ? overrides[id] : ''} disabled={busy}
-                onChange={(event) => { setOverrides({ ...overrides, [id]: event.target.value }); clearReview() }}>
-                <option value="">Same as above</option>{addresses.map(option)}
-              </select></label>
-          })}
         </section>
       </>}
     </div>
-    {!editing && <footer className="drawer-footer">
+    {!editing && <footer className="drawer-footer checkout-footer">
+      <div className="checkout-payment">
+        <span className="muted">Payment method</span>
+        <Dropdown up label="Payment method" value={paymentMethod} options={paymentMethods} onChange={setPaymentMethod} />
+      </div>
       <div><strong>{money(quote?.total_fils ?? total)}</strong><small className="muted">Demo payment. No charge.</small></div>
       {quote ? <button className="big" disabled={busy} onClick={() => run(() => onPlace({
         key: crypto.randomUUID(), cart,
         body: { quote_id: quote.quote_id, ...(decline ? { mock_outcome: 'decline' } : {}) },
       }))}>{busy ? 'Placing order…' : 'Place order'}</button>
-        : <button className="big" disabled={busy || !defaultAddress} onClick={review}>{busy ? 'Checking…' : 'Review order'}</button>}
+        : <button className="big" disabled={busy || !deliveryAddress} onClick={review}>{busy ? 'Checking…' : 'Review order'}</button>}
     </footer>}
   </>
 }

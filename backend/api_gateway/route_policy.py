@@ -24,7 +24,7 @@ LIST = rf"(?:{H}/lists|my-lists)/{S}"
 _NORMAL = {
     "GET": (
         "my-lists", "products", rf"products/{S}", "households", "orders", rf"orders/{S}",
-        "maps/stores", rf"{H}/(?:carts|capabilities|members|addresses|lists)", CART, rf"{CART}/grants", LIST,
+        "maps/stores", rf"{H}/(?:carts|capabilities|members|addresses|lists)", CART, rf"{CART}/(?:grants|inventory)", LIST,
     ),
     "POST": (
         "maps/resolve", rf"{H}/addresses/{S}/resolve-store",
@@ -38,7 +38,8 @@ _NORMAL = {
     "DELETE": (rf"{CART}/items/{S}", rf"{CART}/items/{S}/contributions/{S}", rf"{LIST}/items/{S}"),
 }
 _CRITICAL = {
-    "POST": ("checkout/orders", "auth/age", rf"{H}/leave"),
+    "POST": ("checkout/orders", "auth/age", rf"{H}/child-codes", rf"{H}/leave"),
+    "PATCH": ("auth/profile",),
     "PUT": (rf"{H}/members/{S}/primary", rf"{H}/members/{S}/age"),
     "DELETE": (H, rf"{H}/members/{S}"),
 }

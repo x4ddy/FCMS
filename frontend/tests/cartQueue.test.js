@@ -118,6 +118,17 @@ test('five rapid taps are one request; opposite taps cancel out', async () => {
   assert.deepEqual([page.server.requests.length, page.saved.size, page.spinner()], [1, 0, false])
 })
 
+test('continuous taps send the first batch before the burst ends', async () => {
+  const page = await browser().ready()
+  const firstTapAt = page.clock.now()
+  for (let i = 0; i < 10; i += 1) { page.tap(); await page.clock.advance(100) }
+  assert.equal(page.shown(), 10)
+  assert.deepEqual(page.server.requests.map(({ delta, at }) => [delta, at - firstTapAt]), [[8, SETTINGS.maxBatchWait]])
+  await page.clock.advance(SETTINGS.debounce)
+  assert.deepEqual(page.server.requests.map(({ delta }) => delta), [8, 2])
+  assert.equal(page.server.quantities.milk, 10)
+})
+
 test('a tap while a request is on its way is a new change that waits its turn', async () => {
   const page = await browser().ready()
   page.server.latency = 3000
@@ -326,6 +337,18 @@ test('ordinary refusals and lost connections do not open the circuit', async () 
   for (const sku of ['a', 'b', 'c', 'd']) page.tap(1, { ...MILK, sku })
   await page.clock.advance(30000)
   assert.equal(page.queue.state().breaker, 'closed')
+})
+
+test('stock conflicts remove the optimistic addition and carry availability to other tabs', async () => {
+  const page = await browser().ready()
+  const detail = { store_id: 'uae-dubai', sku: 'milk', available: 0, requested: 1 }
+  page.server.mode = problem(409, { code: 'OUT_OF_STOCK', detail })
+  page.tap(1)
+  assert.equal(page.shown(), 1)
+  await page.clock.advance(30000)
+  assert.equal(page.shown(), 0)
+  assert.equal(page.server.requests.length, 1)
+  assert.deepEqual(page.sent.find((message) => message.type === 'failed').error.detail, detail)
 })
 
 test('offline: nothing is sent until the browser is online again', async () => {

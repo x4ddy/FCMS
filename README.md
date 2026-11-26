@@ -87,6 +87,8 @@ The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_ide
    COMMIT;
    BEGIN;
    \i supabase/migrations/20261126120000_merge_tables.sql
+   \i supabase/migrations/20261126172148_cart_inventory_store.sql
+   \i supabase/migrations/20261126220000_child_codes.sql
    COMMIT;
    \password familycart_identity
    \password familycart_shopping
@@ -94,7 +96,7 @@ The FamilyCart Supabase project in Mumbai hosts both stores. The `familycart_ide
 
    Choose a different generated password for each login. The migration creates the tables and demo household. FamilyCart seeds store inventory on startup. Existing local users and orders stay in their original database.
 
-   An existing project needs each file it has not had yet: `20261125120000_family_updates.sql`, then `20261125150000_checkout_and_roles.sql`. Each can be pasted into the Supabase SQL Editor between `BEGIN;` and `COMMIT;`. Apply them before starting this version. The previous version keeps working after them.
+   For an existing project, apply any pending migrations in filename order before starting this version. The [cart inventory migration](supabase/migrations/20261126172148_cart_inventory_store.sql) adds a nullable store to each cart. Existing carts keep their items.
 
 2. For an IPv4 connection, in the Supabase dashboard choose **Connect → Session pooler**. Copy its host and project reference into the root `.env` using the two service logins below. Percent-encode any reserved URL characters in passwords. These settings belong to the backend.
 
@@ -193,6 +195,8 @@ routes refuse it at once. With Redis down the database decides; with both down t
 
 | Capability | Public route |
 |---|---|
+| Create a child signup code or issue a new sign-in code for an existing child | `POST /api/v1/households/{household_id}/child-codes` |
+| Redeem a child code with a per-attempt UUIDv4 in `Idempotency-Key` | `POST /api/v1/auth/child` |
 | Google client configuration | `GET /api/v1/auth/google/config` |
 | Google login or registration | `POST /api/v1/auth/google` |
 | Complete age setup for an existing account | `GET/POST /api/v1/auth/age` |
@@ -230,6 +234,8 @@ routes refuse it at once. With Redis down the database decides; with both down t
 
 The Gateway exposes `GET /health` for infrastructure checks.
 
+In **Household → Members**, the admin can choose **Add Child** and share the six-character, case-sensitive alphanumeric code privately. The child selects **Login / Register → Use a child code**, enters the code, and chooses a display name. The code expires after 24 hours. The first browser to redeem it joins the household. A retry from that browser can recover the initial session. After logout, the admin can choose **Get sign-in code** beside the child's name to sign them back into the same account. Children can add age-appropriate products to shared carts they can access. Only the household admin can remove a child from the household. Adult products, checkout, address creation and household creation are restricted.
+
 Google registration accepts `credential` and `date_of_birth` in `YYYY-MM-DD` format. If a date is required, Auth returns `422 DATE_OF_BIRTH_REQUIRED` and the client can resubmit with the date. Checkout placement takes a `quote_id` and an `Idempotency-Key` header. Send the same quote and key to recover a successful submission. To fetch another page of Order History, pass the returned `next_cursor` as `before`.
 
 ## Delivery coverage demo
@@ -249,14 +255,13 @@ The browser loads a pinned copy of Leaflet 1.9.4 from unpkg. The basemap uses Op
 ## Checkout demo
 
 1. Choose **Login / Register** and continue with Google. New users enter a self-reported date of birth before FamilyCart creates the account. Returning Google users with a saved date can sign in directly. Existing accounts missing a date complete setup when they next sign in or restore a session.
-2. Before joining or creating a household, save a pinned personal address and add a product from the storefront. Open **My cart** and select **Checkout**. Personal checkout requires an adult account.
-3. To try split delivery, create a household and use **Invite member** to get a code for a second account. Have both members add items to the same shared cart. Save a Dubai personal address for the primary and an Al Ain address in the household address book. Open the shared cart as the adult primary and select **Checkout**. Choose Dubai as the default and assign the other contributor to Al Ain.
-4. Select **Review order**, check the delivery groups and total, then select **Place order**. The review is valid for ten minutes. Orders use mock payment and zero delivery fees.
-5. Open **Order history** in the account header. It lists personal and shared orders you placed, newest first. Select any order to reopen its confirmation and delivery details. Order history and confirmations are private to the purchaser.
+2. Create or join a household and save a pinned delivery address. Open the cart and choose **Set delivery location** with an eligible adult account. FamilyCart resolves the delivery store and checks each product against its stock across all household contributions. Add products, select the items to order, and choose **Checkout**.
+3. Choose one address served by the cart's store, then select **Review order**. To use a different store, return to the cart and change its delivery location. Check the delivery details and total before selecting **Place order**. The review is valid for ten minutes. Orders use mock payment and zero delivery fees.
+4. Open **Order history** from the account menu to see the orders you placed, newest first. Select any order to reopen its confirmation and delivery details. Order history and confirmations are private to the purchaser.
 
 FamilyCart rechecks the cart, addresses, prices, and inventory when you place the order. A successful placement deducts stock, saves the order, and clears the purchased cart items in one transaction. If a connection drops during submission, use **Resume checkout** to retrieve the result of the same attempt.
 
-Set `FAMILYCART_DEMO_CHECKOUT=1` in the local `.env` to show **Simulate a payment decline** when using the launcher. A decline leaves the cart and stock intact. Each store starts with one unit of honey for testing the last-unit case. Stock and orders persist across launcher restarts.
+Set `FAMILYCART_DEMO_CHECKOUT=1` in the local `.env` to show **Simulate a payment decline** when using the launcher. A decline leaves the cart and stock intact. The four stores share one inventory table with one stock row per store and SKU. New rows start with 10 to 20 units. Orders and remaining stock persist across restarts.
 
 ## Authentication behavior
 

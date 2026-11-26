@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.services.familycart_service.app import app
+from backend.services.familycart_service.db import transaction
 from backend.shared.tokens import Identity, issue_token
 
 HOME = {"label": "Home", "recipient_name": "R", "address_line1": "1 Street", "city": "Dubai",
@@ -39,6 +40,8 @@ class SharedShoppingListTests(unittest.TestCase):
             })
             self.assertEqual(joined.status_code, 200)
         [self.shared_cart] = self.client.get(f"{self.root}/carts", headers=self.primary).json()
+        with transaction(app.state.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (self.shared_cart["id"],))
 
     def headers(self, user_id: str, *, adult: bool = True) -> dict[str, str]:
         return {"Authorization": f"Bearer {issue_token(Identity(user_id, adult), self.secret)}"}

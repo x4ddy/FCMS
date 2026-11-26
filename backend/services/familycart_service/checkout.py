@@ -3,6 +3,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from random import Random
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -11,8 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend.services.maps_service.app import STORES
 from backend.shared.database import DatabaseConnection
+from backend.shared.tokens import is_child_account
 
 from .db import ACTIVE_ADDRESS, ADDRESS_FIELDS, active_member, load_carts, load_contributions, lock_household
+
+STORE_NAMES = {store.store_id: store.name for store in STORES}
 
 
 class CheckoutInput(BaseModel):
@@ -60,20 +64,55 @@ def stale() -> HTTPException:
     return error(409, "QUOTE_STALE", "The cart, delivery address, or pricing changed. Review checkout again.")
 
 
+def store_required() -> HTTPException:
+    return error(409, "CART_STORE_REQUIRED", "Set a delivery location for this cart first.")
+
+
+def stock_quantity(db, store_id: str, sku: str, *, lock: bool = False) -> int:
+    row_lock = " FOR UPDATE" if lock and db.dialect == "postgresql" else ""
+    row = db.execute(
+        "SELECT quantity FROM store_inventory WHERE store_id = ? AND sku = ?" + row_lock, (store_id, sku),
+    ).fetchone()
+    return row["quantity"] if row else 0
+
+
+def require_stock(db, store_id: str | None, sku: str, requested: int) -> None:
+    if store_id is None:
+        raise store_required()
+    available = stock_quantity(db, store_id, sku)
+    if requested > available:
+        raise error(409, "OUT_OF_STOCK", f"{available} available from {STORE_NAMES.get(store_id, store_id)}.",
+                    store_id=store_id, sku=sku, requested=requested, available=available)
+
+
+def initial_stock(store_id: str, sku: str) -> int:
+    # The legacy database transfer compares unused inventory against a fresh seed.
+    return Random(f"familycart-inventory:{store_id}:{sku}").randint(10, 20)
+
+
 def seed_inventory(db: DatabaseConnection, products) -> None:
-    # The last jar of honey at each store is available for the contention demo.
-    values = [(store.store_id, sku, 1 if sku == "honey" else 100) for store in STORES for sku in sorted(products)]
-    if values:
-        placeholders = ", ".join(["(?, ?, ?)"] * len(values))
-        db.execute(
-            f"INSERT INTO store_inventory (store_id, sku, quantity) VALUES {placeholders} "
-            "ON CONFLICT (store_id, sku) DO NOTHING",
-            tuple(value for row in values for value in row),
-        )
+    if not products:
+        return
+
+    skus = sorted(products)
+    sku_placeholders = ", ".join(["?"] * len(skus))
+    db.execute(f"DELETE FROM store_inventory WHERE sku NOT IN ({sku_placeholders})", skus)
+
+    values = [(store.store_id, sku, initial_stock(store.store_id, sku)) for store in STORES for sku in skus]
+    placeholders = ", ".join(["(?, ?, ?)"] * len(values))
+    db.execute(
+        f"INSERT INTO store_inventory (store_id, sku, quantity) VALUES {placeholders} "
+        "ON CONFLICT (store_id, sku) DO NOTHING",
+        tuple(value for row in values for value in row),
+    )
 
 
 def lock_cart(db, reference, caller) -> None:
     lock_household(db, reference.household_id)
+
+
+def eligible(caller, age_status: str | None = None) -> bool:
+    return caller.is_adult and age_status in (None, "APPROVED") and not is_child_account(caller.user_id)
 
 
 def cart_state(db, reference, caller):
@@ -82,8 +121,8 @@ def cart_state(db, reference, caller):
     if member is None:
         raise error(404, "CART_NOT_FOUND", "Cart not found.")
     is_admin = member["owner_id"] == caller.user_id
-    if not is_admin and not caller.is_adult:
-        raise error(403, "CHECKOUT_FORBIDDEN", "Child users cannot check out.")
+    if not eligible(caller, member["age_status"]):
+        raise error(403, "AGE_ELIGIBILITY_REQUIRED", "Checkout requires an adult account.")
     cart = load_carts(db, household_id, caller.user_id, reference.cart_id).fetchone()
     granted = cart is not None and (is_admin or (
         not cart["creator_revoked"] if cart["creator_id"] == caller.user_id else cart["has_grant"]
@@ -166,6 +205,7 @@ def snapshot(db, selection: QuoteInput, caller, products, *, lock: bool) -> dict
     ).fetchone()
     return {
         "cart_id": cart["id"], "cart_revision": revision["revision"] if revision else 0,
+        "inventory_store_id": cart["inventory_store_id"],
         "selection": selection.model_dump(), "default_address": address_data[address_key(selection.default_address)],
         "groups": [groups[key] for key in sorted(groups)],
     }
@@ -207,25 +247,25 @@ def check_stock(db, groups, *, lock: bool) -> Counter:
         for line in group["lines"]:
             requested[group["store_id"], line["sku"]] += line["quantity"]
     unavailable = {}
-    row_lock = " FOR UPDATE" if lock and db.dialect == "postgresql" else ""
     for (store_id, sku), quantity in sorted(requested.items()):
-        row = db.execute(
-            "SELECT quantity FROM store_inventory WHERE store_id = ? AND sku = ?" + row_lock, (store_id, sku),
-        ).fetchone()
-        available = row["quantity"] if row else 0
+        available = stock_quantity(db, store_id, sku, lock=lock)
         if quantity > available:
             unavailable[store_id, sku] = available
     if unavailable:
-        shortages = [
-            {"group_number": index, "store_id": group["store_id"], "sku": sku,
-             "requested": requested[group["store_id"], sku], "available": unavailable[group["store_id"], sku]}
-            for index, group in enumerate(groups, 1)
-            for sku in sorted({line["sku"] for line in group["lines"]})
-            if (group["store_id"], sku) in unavailable
-        ]
-        raise error(409, "OUT_OF_STOCK", "Some items exceed stock at their assigned store.",
-                    delivery_groups=groups, shortages=shortages)
+        raise stock_conflict(groups, requested, unavailable)
     return requested
+
+
+def stock_conflict(groups, requested, unavailable) -> HTTPException:
+    shortages = [
+        {"group_number": index, "store_id": group["store_id"], "sku": sku,
+         "requested": requested[group["store_id"], sku], "available": unavailable[group["store_id"], sku]}
+        for index, group in enumerate(groups, 1)
+        for sku in sorted({line["sku"] for line in group["lines"]})
+        if (group["store_id"], sku) in unavailable
+    ]
+    return error(409, "OUT_OF_STOCK", "Some items exceed stock at their assigned store.",
+                 delivery_groups=groups, shortages=shortages)
 
 
 def quote_response(quote_id, expires_at, groups, demo_enabled) -> dict:
@@ -237,7 +277,14 @@ def quote_response(quote_id, expires_at, groups, demo_enabled) -> dict:
 
 
 def save_quote(db, purchaser_id, state, groups, demo_enabled) -> dict:
+    store_id = state["inventory_store_id"]
+    if store_id and groups[0]["store_id"] != store_id:
+        raise error(409, "CART_STORE_MISMATCH",
+                    f"This address is served by {groups[0]['store_name']}. Change the delivery store from the cart.",
+                    store_id=store_id, address_store_id=groups[0]["store_id"])
     check_stock(db, groups, lock=False)
+    if store_id is None:
+        raise store_required()
     quote_id = str(uuid4())
     now = datetime.now(timezone.utc)
     expires_at = (now + timedelta(minutes=10)).isoformat()
@@ -345,7 +392,8 @@ def revalidate(db, reviewed_state, selection, caller, products, *, lock: bool) -
         if issue.detail["code"] in {"EMPTY_CART", "SELECTION_CHANGED", "ADDRESS_NOT_FOUND", "ITEM_UNAVAILABLE", "INVALID_CONTRIBUTOR"}:
             raise stale() from None
         raise
-    if state != reviewed_state:
+    # Reviews issued before carts had assigned stores can still be placed before expiry.
+    if state != {"inventory_store_id": None, **reviewed_state}:
         raise stale()
     return state
 
@@ -366,10 +414,13 @@ def claim_order(db, purchaser_id, key, attempt, body, selection, groups):
 
 def fulfill_order(db, order_id, groups, requested) -> None:
     for (store_id, sku), quantity in sorted(requested.items()):
-        db.execute(
-            "UPDATE store_inventory SET quantity = quantity - ? WHERE store_id = ? AND sku = ?",
-            (quantity, store_id, sku),
-        )
+        updated = db.execute(
+            """UPDATE store_inventory SET quantity = quantity - ?
+               WHERE store_id = ? AND sku = ? AND quantity >= ? RETURNING quantity""",
+            (quantity, store_id, sku, quantity),
+        ).fetchone()
+        if updated is None:
+            raise stock_conflict(groups, requested, {(store_id, sku): stock_quantity(db, store_id, sku)})
     for number, group in enumerate(groups, 1):
         address_ref = group["address_ref"]
         db.execute(

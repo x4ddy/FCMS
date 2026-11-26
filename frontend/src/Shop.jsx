@@ -1,14 +1,29 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import { Dropdown, Empty, Icon, money, Overlay, ProductImage, Stepper } from './ui.jsx'
 
-const SHELF = 12
+const SHELF = 7
 const SORTS = {
   featured: ['Featured', null],
   low: ['Price: low to high', (a, b) => a.price_fils - b.price_fils],
   high: ['Price: high to low', (a, b) => b.price_fils - a.price_fils],
   name: ['Name: A to Z', (a, b) => a.name.localeCompare(b.name)],
 }
-const PREVIEW = ['strawberries', 'croissants', 'cheese', 'avocados', 'cookies', 'juice-boxes', 'watermelon', 'ice-cream']
+const CATEGORY_ART = {
+  'Fruit & Vegetables': 'produce',
+  'Milk, Eggs & Dairy': 'dairy',
+  Bakery: 'bakery',
+  'Meat & Poultry': 'meat',
+  'Fish & Seafood': 'seafood',
+  Pantry: 'pantry',
+  'Snacks & Sweets': 'snacks',
+  Drinks: 'drinks',
+  Frozen: 'frozen',
+  Household: 'household',
+}
+
+function GroceryArt({ className }) {
+  return <img className={className} src="/storefront/grocery-hero.webp" width="509" height="179" alt="" />
+}
 
 export function Landing({ onOpenAuth }) {
   return <section className="landing page" aria-label="FamilyCart">
@@ -17,9 +32,7 @@ export function Landing({ onOpenAuth }) {
       <p>Everyone adds what they need, changes show up for the whole household, and one person checks out.</p>
       <button className="big" onClick={onOpenAuth}>Start shopping</button>
     </div>
-    <div className="landing-art" aria-hidden="true">
-      {PREVIEW.map((sku, index) => <span key={sku} style={{ '--i': index }}><img src={`/products/${sku}.webp`} alt="" /></span>)}
-    </div>
+    <GroceryArt className="landing-art" />
     <ul className="landing-points">
       <li><strong>Shared carts</strong><p>Several carts per household, with access you control.</p></li>
       <li><strong>Lists that become carts</strong><p>Private and household lists. Send only what you pick.</p></li>
@@ -33,9 +46,16 @@ function CartControl({ product, shop }) {
   if (shop.needsHousehold) return null
   if (product.min_age > 0 && !shop.adultsOnly) return <span className="card-note">18+ cart only</span>
   const busy = shop.unresolved.has(product.sku)
-  if (quantity < 1 && !busy) return <button className="add-button" disabled={!shop.canEdit}
-    aria-label={`Add ${product.name}`} onClick={() => shop.onAdjust(product, 1)}>ADD <span aria-hidden="true">+</span></button>
+  const remainingStock = shop.stock ? (shop.stock[product.sku] ?? 0) - quantity : null
+  if (quantity < 1 && !busy) {
+    const soldOut = remainingStock === 0
+    return <button className={`add-button${soldOut ? ' secondary' : ''}`} disabled={!shop.canEdit || remainingStock == null}
+      aria-label={soldOut ? `${product.name} is out of stock` : `Add ${product.name}`} onClick={() => shop.onAdjust(product, 1)}>
+      {soldOut ? 'Out of stock' : <>Add <Icon name="plus" size={13} /></>}
+    </button>
+  }
   return <Stepper label={product.name} quantity={quantity} disabled={!shop.canEdit} canRemove={shop.canRemove(product.sku)}
+    remainingStock={remainingStock}
     removeHint="You cannot remove this right now" busy={busy} onAdjust={(delta) => shop.onAdjust(product, delta)} />
 }
 
@@ -47,20 +67,23 @@ function sameCard(before, after) {
   return before.product === after.product && before.onOpen === after.onOpen && before.onWish === after.onWish && before.wished === after.wished
     && a.quantities[sku] === b.quantities[sku] && a.unresolved.has(sku) === b.unresolved.has(sku) && a.canEdit === b.canEdit && a.adultsOnly === b.adultsOnly
     && a.needsHousehold === b.needsHousehold && a.canRemove(sku) === b.canRemove(sku) && a.onAdjust === b.onAdjust
+    && Boolean(a.stock) === Boolean(b.stock) && a.stock?.[sku] === b.stock?.[sku]
 }
 
 const ProductCard = React.memo(function ProductCard({ product, shop, onOpen, onWish, wished }) {
+  const pack = product.name.match(/^(.+),\s*((?:\d|Pack of\b).+)$/i)
   return <article className="product-card">
-    <div className="product-tile">
-      <button className="product-open" tabIndex={-1} aria-hidden="true" onClick={() => onOpen(product)}><ProductImage product={product} /></button>
-      <button className={`wish-button${wished ? ' on' : ''}`} aria-label={`Add ${product.name} to a list`} title="Add to a list" onClick={() => onWish(product)}>
-        <Icon name="heart" size={18} /></button>
+    <button className="product-open" onClick={() => onOpen(product)} aria-label={`View ${product.name}`}>
+      <ProductImage product={product} />
+      <span className="product-name">{pack?.[1] ?? product.name}</span>
+      {pack && <small className="muted">{pack[2]}</small>}
+    </button>
+    <button className={`wish-button${wished ? ' on' : ''}`} aria-label={`Add ${product.name} to a list`} title="Add to a list" onClick={() => onWish(product)}>
+      <Icon name="heart" size={17} /></button>
+    <div className="product-bottom">
+      <span className="price">{money(product.price_fils)}</span>
       <CartControl product={product} shop={shop} />
     </div>
-    <button className="product-text" onClick={() => onOpen(product)} aria-label={`View ${product.name}`}>
-      <span className="price">{money(product.price_fils)}</span>
-      <span className="product-name">{product.name}</span>
-    </button>
   </article>
 }, sameCard)
 
@@ -138,7 +161,7 @@ function ProductSheet({ product, products, shop, people, wished, onWish, onOpen,
 }
 
 export function ShopPage({
-  products, loading, query, onClearQuery, shop, carts, household, roleName, checkoutBy, userName, peopleFor, listApis,
+  childAccount, products, loading, query, onClearQuery, shop, carts, household, roleName, checkoutBy, userName, peopleFor, listApis,
   onSelectCart, onSetUpHousehold, onOpenCart, onNotify,
 }) {
   const [category, setCategory] = useState('All')
@@ -152,16 +175,16 @@ export function ShopPage({
   const categories = useMemo(() => {
     const first = new Map()
     for (const product of products) if (!first.has(product.category)) first.set(product.category, product)
-    return [...first]
+    const order = [...Object.keys(CATEGORY_ART), ...first.keys()]
+    return [...new Set(order)].filter((name) => first.has(name)).map((name) => [name, first.get(name)])
   }, [products])
-  useEffect(() => { if (search) setCategory('All') }, [search])
   useEffect(() => {
     if (category !== 'All' && products.length && !categories.some(([name]) => name === category)) setCategory('All')
   }, [categories, category, products.length])
 
   const results = useMemo(() => {
     const words = search.split(/\s+/).filter(Boolean)
-    const found = products.filter((product) => (category === 'All' || product.category === category)
+    const found = products.filter((product) => (search || category === 'All' || product.category === category)
       && words.every((word) => `${product.name} ${product.category}`.toLowerCase().includes(word)))
     const order = SORTS[sort][1]
     return order ? [...found].sort(order) : found
@@ -174,26 +197,40 @@ export function ShopPage({
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   const total = Object.values(shop.quantities).reduce((sum, quantity) => sum + quantity, 0)
-  const value = products.reduce((sum, product) => sum + product.price_fils * (shop.quantities[product.sku] ?? 0), 0)
   const card = (product) => <ProductCard key={product.sku} product={product} shop={shop} onOpen={openProduct}
     onWish={setWishing} wished={wished.has(product.sku)} />
+  const showHero = shelves
+  const cartPicker = household && <div className="cart-picker">
+    {carts.length > 0 ? <>
+      <span>Add products to</span>
+      <Dropdown label="Add products to" value={shop.cartId} icon="cart" onChange={onSelectCart}
+        options={carts.map((cart) => ({
+          value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart',
+          note: [cart.adults_only && 'Adults only', cart.id === shop.cartId && (total > 0 ? `${total} ${total === 1 ? 'item' : 'items'}` : 'Empty')]
+            .filter(Boolean).join(' · '),
+        }))} />
+    </> : household.role === 'primary' ? <button className="secondary" onClick={onOpenCart}>View household carts</button>
+      : <p className="muted">Ask the household admin for access to a cart.</p>}
+    {showHero && <div className="shop-role"><Icon name="people" size={17} /> <span>{household.name} · {roleName}</span></div>}
+  </div>
 
   return <div className="page shop-page">
-    {!search && category === 'All' && <div className="shop-intro">
-      <div>
-        <h1>{household ? 'Shopping for your household' : `Hello, ${userName}`}</h1>
-        <p className="muted">{household ? `${household.name} · ${roleName}`
-          : 'Create or join a household to start shopping. My lists work already.'}</p>
+    {showHero ? <section className="shop-intro">
+      <div className="shop-intro-copy">
+        <h1>{household ? 'Household shopping, delivered together' : `Hello, ${userName}`}</h1>
+        <p>{household ? 'Shop groceries and everyday essentials in one shared cart.'
+          : childAccount ? 'You no longer belong to a household.' : 'Create or join a household to start shopping together.'}</p>
       </div>
-      {!household ? <button onClick={onSetUpHousehold}>Set up household</button>
-        : carts.length > 0 ? <div className="cart-picker"><span>Add products to</span>
-          <Dropdown label="Add products to" value={shop.cartId} icon="cart" onChange={onSelectCart}
-            options={carts.map((cart) => ({
-              value: cart.id, label: cart.name, icon: cart.adults_only ? 'lock' : 'cart',
-              note: [cart.adults_only && 'Adults only', cart.id === shop.cartId && (total > 0 ? `${total} ${total === 1 ? 'item' : 'items'}` : 'Empty')]
-                .filter(Boolean).join(' · '),
-            }))} /></div>
-          : household.role !== 'primary' && <p className="muted">You have no cart yet. Ask the admin for access.</p>}
+      <GroceryArt className="shop-intro-art" />
+      {household ? cartPicker : !childAccount && <div className="shop-setup"><button onClick={onSetUpHousehold}>Set up household</button></div>}
+    </section> : household && <div className="shop-tools">{cartPicker}</div>}
+
+    {shop.cartId && <div className="banner row" role="status">
+      <span>{shop.storeName ? `Delivery from ${shop.storeName}${!shop.stock && !shop.inventoryFailed ? ' · Checking stock' : ''}` : shop.canSetStore
+        ? 'Set a delivery location before adding products.' : 'An eligible adult needs to set this cart’s delivery location.'}</span>
+      {shop.inventoryFailed
+        ? <button className="secondary" onClick={shop.retryInventory}>Retry stock check</button>
+        : shop.canSetStore && <button className="secondary" onClick={onOpenCart}>{shop.storeName ? 'View cart' : 'Set delivery'}</button>}
     </div>}
 
     {checkoutBy && checkoutBy !== 'You' && <div className="banner" role="status"><strong>{checkoutBy} is checking out this cart</strong>
@@ -202,18 +239,20 @@ export function ShopPage({
     {!search && <div className="categories" role="group" aria-label="Shop by category">
       {[['All', null], ...categories].map(([name, sample]) => <button key={name} aria-pressed={category === name}
         className="category" onClick={() => choose(name)}>
-        <span className="category-tile">{sample ? <ProductImage product={sample} /> : <Icon name="cart" size={34} />}</span>
+        <span className="category-tile">{CATEGORY_ART[name] ? <img src={`/storefront/${CATEGORY_ART[name]}.webp`} alt="" />
+          : sample ? <ProductImage product={sample} /> : <Icon name="grid" size={33} />}</span>
         <span>{name}</span>
       </button>)}
     </div>}
 
     {loading ? <div className="product-grid" aria-busy="true">
       {Array.from({ length: 12 }, (_, index) => <div className="product-card skeleton" key={index} />)}
-    </div> : shelves ? categories.map(([name]) => {
+    </div> : shelves && categories.length === 0 ? <Empty icon={<Icon name="cart" size={38} />} title="No products available" />
+      : shelves ? categories.map(([name]) => {
       const items = results.filter((product) => product.category === name)
       return <section className="shelf-section" key={name}>
         <div className="section-head"><h2>{name}</h2>
-          {items.length > 4 && <button className="text-button" onClick={() => choose(name)}>See all {items.length}</button>}</div>
+          {items.length > SHELF && <button className="text-button" onClick={() => choose(name)}>See all {items.length} <Icon name="arrow" size={16} /></button>}</div>
         <div className="shelf">{items.slice(0, SHELF).map(card)}</div>
       </section>
     }) : <section>
@@ -223,18 +262,14 @@ export function ShopPage({
         <Dropdown className="sorter" label="Sort products" value={sort} onChange={setSort}
           options={Object.entries(SORTS).map(([id, [label]]) => ({ value: id, label }))} />
       </div>
-      {results.length === 0 ? <Empty icon="🔎" title="Nothing matches">
+      {results.length === 0 ? <Empty icon={<Icon name="search" size={38} />} title="Nothing matches">
         <p>Try a shorter word, or browse the categories.</p>
-        <button className="secondary" onClick={onClearQuery}>Clear search</button>
+        <button className="secondary" onClick={() => choose('All')}>Browse all products</button>
       </Empty> : <div className="product-grid">{results.map(card)}</div>}
     </section>}
 
-    {shelves && !loading && <button className="secondary see-all" onClick={() => { setSort('name'); window.scrollTo({ top: 0 }) }}>
+    {shelves && !loading && products.length > 0 && <button className="secondary see-all" onClick={() => { setSort('name'); window.scrollTo({ top: 0 }) }}>
       View all {products.length} products</button>}
-
-    {total > 0 && <button className="mobile-cart-bar" onClick={onOpenCart}>
-      <span>{total} {total === 1 ? 'item' : 'items'} · {money(value)}</span><strong>View cart</strong>
-    </button>}
 
     {viewing && <ProductSheet product={viewing} products={products} shop={shop} people={peopleFor(viewing.sku)} wished={wished} onWish={setWishing}
       onOpen={openProduct} onClose={() => setViewingSku(null)} />}

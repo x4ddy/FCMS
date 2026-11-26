@@ -2,6 +2,8 @@ import os
 import logging
 from dataclasses import dataclass
 
+from backend.shared.tokens import is_child_account
+
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -47,7 +49,7 @@ def verify_google_credential(credential: str, client_id: str) -> GoogleIdentity:
     subject = str(claims.get("sub", "")).strip()
     email = str(claims.get("email", "")).strip().casefold()
     name = str(claims.get("name", "")).strip()
-    if not subject or not email or claims.get("email_verified") is not True:
+    if not subject or is_child_account(subject) or not email or claims.get("email_verified") is not True:
         raise InvalidGoogleCredential("Google sign-in could not be verified")
     if not email.endswith("@gmail.com"):
         raise InvalidGoogleCredential("Please use a Gmail account")

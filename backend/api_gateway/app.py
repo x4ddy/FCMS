@@ -6,6 +6,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from http.cookiejar import CookieJar
 from uuid import uuid4
 
 import httpx
@@ -30,12 +31,19 @@ MAX_BODY_BYTES = 1024 * 1024
 MAX_LIMITER_ENTRIES = 50_000
 SWEEP_SECONDS = 5
 SOCKET_RECHECK_SECONDS = 30
-PUBLIC_AUTH = {"auth/google", "auth/google/config"}
+PUBLIC_AUTH = {"auth/child", "auth/google", "auth/google/config"}
 MAP_ROUTES = {"maps/stores": "GET", "maps/resolve": "POST"}
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "content-length",
 }
+
+
+class ProxyCookieJar(CookieJar):
+    """Upstream cookies belong to the requesting browser. The shared client never stores them."""
+
+    def extract_cookies(self, response, request):
+        pass
 
 
 class SlidingWindowLimiter:
@@ -147,8 +155,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.familycart_url = os.environ.get("FAMILYCART_API_URL", "http://127.0.0.1:8002")
     app.state.refresh_url = os.environ.get("FAMILYCART_REFRESH_URL", "http://127.0.0.1:8003")
     app.state.maps_url = maps_service_url()
-    app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3))
-    maps_http = app.state.maps_http = httpx.AsyncClient(timeout=httpx.Timeout(4, connect=1), trust_env=False)
+    app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10, connect=3), cookies=ProxyCookieJar())
+    maps_http = app.state.maps_http = httpx.AsyncClient(
+        timeout=httpx.Timeout(4, connect=1), cookies=ProxyCookieJar(), trust_env=False,
+    )
     app.state.limiter = SlidingWindowLimiter()
     subscriber = async_client(cache_redis_url(), socket_timeout=5, health_check_interval=5)
     app.state.sessions = SessionValidator(app.state.user_db_path, async_client(cache_redis_url()), subscriber)
@@ -195,7 +205,7 @@ async def proxy(path: str, request: Request) -> Response:
         raise HTTPException(status_code=400, detail="Invalid request path")
     client_ip = request.client.host if request.client else "unknown"
     sensitive = path in {
-        "auth/google", "auth/age", "sessions/refresh",
+        "auth/google", "auth/child", "auth/age", "sessions/refresh",
         "household-invitations/accept",
     }
     limit = 10 if sensitive else 120

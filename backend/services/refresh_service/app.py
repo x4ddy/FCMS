@@ -5,14 +5,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
 from jwt import InvalidTokenError
-from pydantic import BaseModel
 
 from backend.services.user_service.db import database_path, initialize_database
 from backend.shared.api import API_PREFIX
 from backend.shared.database import database_error_types
 from backend.shared.tokens import load_jwt_secret, verify_token
 
-from .cookies import REFRESH_COOKIE, clear_refresh_cookie, set_refresh_cookie
+from .cookies import REFRESH_COOKIE, clear_refresh_cookie
+from .responses import RefreshResponse, signed_in_response
 from .service import (
     InvalidRefreshToken,
     refresh_session_id,
@@ -28,20 +28,6 @@ DATABASE_ERRORS = database_error_types()
 def temporarily_unavailable(detail: str, error: Exception) -> HTTPException:
     logger.warning("Session database unavailable: %s", type(error).__name__)
     return HTTPException(status_code=503, detail=detail, headers={"Retry-After": "5", "Cache-Control": "no-store"})
-
-
-class SignedInUser(BaseModel):
-    id: str
-    display_name: str
-    is_adult: bool
-    age_setup_required: bool
-
-
-class RefreshResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    expires_in: int
-    user: SignedInUser
 
 
 def _check_origin(origin: str | None) -> None:
@@ -66,7 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="FamilyCart Refresh Service", lifespan=lifespan)
 
 
-@app.post(f"{API_PREFIX}/sessions/refresh")
+@app.post(f"{API_PREFIX}/sessions/refresh", response_model_exclude_none=True)
 def refresh(
     request: Request,
     response: Response,
@@ -86,14 +72,7 @@ def refresh(
     except DATABASE_ERRORS as error:
         # Not a verdict on the session, so the cookie is kept for another try.
         raise temporarily_unavailable("Your session could not be checked. Try again shortly.", error) from None
-    set_refresh_cookie(response, tokens.refresh_token)
-    response.headers["Cache-Control"] = "no-store"
-    return RefreshResponse(
-        access_token=tokens.access_token,
-        expires_in=tokens.expires_in,
-        user=SignedInUser(id=tokens.user_id, display_name=tokens.display_name, is_adult=tokens.is_adult,
-                          age_setup_required=tokens.age_setup_required),
-    )
+    return signed_in_response(response, tokens)
 
 
 @app.post(f"{API_PREFIX}/sessions/logout", status_code=204)

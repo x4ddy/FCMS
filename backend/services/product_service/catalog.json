@@ -84,17 +84,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "ginger",
-    "name": "Fresh Ginger, 200 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 350,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/ginger.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "strawberries",
     "name": "Strawberries, 250 g",
     "category": "Fruit & Vegetables",
@@ -106,39 +95,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "blueberries",
-    "name": "Blueberries, 125 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1195,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/blueberries.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "cherries",
-    "name": "Cherries, 250 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/cherries.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "tangerines",
-    "name": "Tangerines, 1 kg",
-    "category": "Fruit & Vegetables",
-    "price_fils": 795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/tangerines.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "lemons",
     "name": "Lemons, 500 g",
     "category": "Fruit & Vegetables",
@@ -147,61 +103,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/lemons.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "grapes",
-    "name": "Red Grapes, 500 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1150,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/grapes.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "mangoes",
-    "name": "Mangoes, 1 kg",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1495,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/mangoes.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "peaches",
-    "name": "Peaches, 500 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1250,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/peaches.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "pears",
-    "name": "Green Pears, 1 kg",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1050,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/pears.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "kiwi",
-    "name": "Kiwi, 4 pcs",
-    "category": "Fruit & Vegetables",
-    "price_fils": 895,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/kiwi.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -227,28 +128,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "pineapple",
-    "name": "Pineapple, 1 pc",
-    "category": "Fruit & Vegetables",
-    "price_fils": 1350,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/pineapple.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "coconut",
-    "name": "Coconut, 1 pc",
-    "category": "Fruit & Vegetables",
-    "price_fils": 650,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/coconut.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "broccoli",
     "name": "Broccoli, 500 g",
     "category": "Fruit & Vegetables",
@@ -257,72 +136,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/broccoli.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "lettuce",
-    "name": "Lettuce, 1 pc",
-    "category": "Fruit & Vegetables",
-    "price_fils": 550,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/lettuce.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "bell-peppers",
-    "name": "Bell Peppers, 500 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/bell-peppers.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "chillies",
-    "name": "Red Chillies, 100 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 295,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/chillies.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "aubergine",
-    "name": "Aubergine, 500 g",
-    "category": "Fruit & Vegetables",
-    "price_fils": 575,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/aubergine.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "sweetcorn",
-    "name": "Sweetcorn, 2 pcs",
-    "category": "Fruit & Vegetables",
-    "price_fils": 695,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/sweetcorn.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "sweet-potatoes",
-    "name": "Sweet Potatoes, 1 kg",
-    "category": "Fruit & Vegetables",
-    "price_fils": 795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/sweet-potatoes.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -378,28 +191,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "goat-milk",
-    "name": "Goat Milk, 1 L",
-    "category": "Milk, Eggs & Dairy",
-    "price_fils": 895,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/goat-milk.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "custard",
-    "name": "Caramel Custard, 4 pcs",
-    "category": "Milk, Eggs & Dairy",
-    "price_fils": 995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/custard.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "bread",
     "name": "Lusine Sliced Milk Bread, 275 g",
     "category": "Bakery",
@@ -432,17 +223,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "bagels",
-    "name": "Bagels, 4 pcs",
-    "category": "Bakery",
-    "price_fils": 1150,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/bagels.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "baguette",
     "name": "French Baguette, 1 pc",
     "category": "Bakery",
@@ -451,61 +231,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/baguette.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "pretzels",
-    "name": "Soft Pretzels, 2 pcs",
-    "category": "Bakery",
-    "price_fils": 950,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/pretzels.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "cupcakes",
-    "name": "Cupcakes, 4 pcs",
-    "category": "Bakery",
-    "price_fils": 1695,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/cupcakes.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "doughnuts",
-    "name": "Glazed Doughnuts, 4 pcs",
-    "category": "Bakery",
-    "price_fils": 1495,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/doughnuts.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "waffles",
-    "name": "Waffles, 6 pcs",
-    "category": "Bakery",
-    "price_fils": 1250,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/waffles.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "birthday-cake",
-    "name": "Birthday Cake, 1 kg",
-    "category": "Bakery",
-    "price_fils": 5995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/birthday-cake.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -541,39 +266,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "lamb-chops",
-    "name": "Lamb on the Bone, 500 g",
-    "category": "Meat & Poultry",
-    "price_fils": 3295,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/lamb-chops.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "beef-bacon",
-    "name": "Beef Bacon, 200 g",
-    "category": "Meat & Poultry",
-    "price_fils": 1650,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/beef-bacon.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "beef-burgers",
-    "name": "Beef Burger Kit, 4 pcs",
-    "category": "Meat & Poultry",
-    "price_fils": 2195,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/beef-burgers.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "whole-fish",
     "name": "Fresh Fish, 1 kg",
     "category": "Fish & Seafood",
@@ -593,39 +285,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/shrimp.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "crab",
-    "name": "Crab, 500 g",
-    "category": "Fish & Seafood",
-    "price_fils": 2650,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/crab.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "squid",
-    "name": "Squid, 400 g",
-    "category": "Fish & Seafood",
-    "price_fils": 1995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/squid.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "sushi",
-    "name": "Sushi Box, 8 pcs",
-    "category": "Fish & Seafood",
-    "price_fils": 2995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/sushi.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -689,83 +348,6 @@
     "price_source_url": "https://gcc.luluhypermarket.com/en-ae/california-garden-canned-cooked-chickpeas-400-g/p/13750/"
   },
   {
-    "sku": "olives",
-    "name": "Green Olives, 400 g",
-    "category": "Pantry",
-    "price_fils": 1195,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/olives.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "red-beans",
-    "name": "Red Beans, 1 kg",
-    "category": "Pantry",
-    "price_fils": 895,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/red-beans.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "canned-soup",
-    "name": "Canned Tomato Soup, 400 g",
-    "category": "Pantry",
-    "price_fils": 650,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/canned-soup.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "salt",
-    "name": "Table Salt, 700 g",
-    "category": "Pantry",
-    "price_fils": 250,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/salt.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "peanuts",
-    "name": "Peanuts, 300 g",
-    "category": "Pantry",
-    "price_fils": 895,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/peanuts.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "instant-noodles",
-    "name": "Instant Noodles, 5 packs",
-    "category": "Pantry",
-    "price_fils": 1050,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/instant-noodles.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "tortilla-wraps",
-    "name": "Tortilla Wraps, 8 pcs",
-    "category": "Pantry",
-    "price_fils": 995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/tortilla-wraps.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "chocolate-bar",
     "name": "Milk Chocolate, 100 g",
     "category": "Snacks & Sweets",
@@ -796,50 +378,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/popcorn.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "sweets",
-    "name": "Assorted Sweets, 200 g",
-    "category": "Snacks & Sweets",
-    "price_fils": 795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/sweets.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "lollipops",
-    "name": "Lollipops, 10 pcs",
-    "category": "Snacks & Sweets",
-    "price_fils": 650,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/lollipops.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "chestnuts",
-    "name": "Roasted Chestnuts, 200 g",
-    "category": "Snacks & Sweets",
-    "price_fils": 1295,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/chestnuts.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "rice-crackers",
-    "name": "Rice Crackers, 100 g",
-    "category": "Snacks & Sweets",
-    "price_fils": 725,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/rice-crackers.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -874,17 +412,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "green-tea",
-    "name": "Green Tea, 25 bags",
-    "category": "Drinks",
-    "price_fils": 1195,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/green-tea.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "juice-boxes",
     "name": "Apple Juice Boxes, 6 × 200 ml",
     "category": "Drinks",
@@ -893,28 +420,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/juice-boxes.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "bubble-tea",
-    "name": "Bubble Tea, 500 ml",
-    "category": "Drinks",
-    "price_fils": 1495,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/bubble-tea.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "soft-drink",
-    "name": "Cola, 1.5 L",
-    "category": "Drinks",
-    "price_fils": 795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/soft-drink.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -939,17 +444,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "shaved-ice",
-    "name": "Strawberry Shaved Ice, 4 cups",
-    "category": "Frozen",
-    "price_fils": 1450,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/shaved-ice.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "french-fries",
     "name": "French Fries, 1 kg",
     "category": "Frozen",
@@ -958,50 +452,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/french-fries.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "frozen-pizza",
-    "name": "Pizza, 350 g",
-    "category": "Frozen",
-    "price_fils": 1695,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/frozen-pizza.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "dumplings",
-    "name": "Chicken Dumplings, 500 g",
-    "category": "Frozen",
-    "price_fils": 1795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/dumplings.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "green-peas",
-    "name": "Green Peas, 450 g",
-    "category": "Frozen",
-    "price_fils": 695,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/green-peas.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "ice-cubes",
-    "name": "Ice Cubes, 2 kg",
-    "category": "Frozen",
-    "price_fils": 500,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/ice-cubes.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -1023,72 +473,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/toilet-paper.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "sponges",
-    "name": "Kitchen Sponges, 3 pcs",
-    "category": "Household",
-    "price_fils": 550,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/sponges.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "broom",
-    "name": "Broom, 1 pc",
-    "category": "Household",
-    "price_fils": 1995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/broom.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "bucket",
-    "name": "Cleaning Bucket, 10 L",
-    "category": "Household",
-    "price_fils": 1750,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/bucket.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "light-bulbs",
-    "name": "LED Bulbs, 2 pcs",
-    "category": "Household",
-    "price_fils": 1895,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/light-bulbs.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "batteries",
-    "name": "AA Batteries, 8 pcs",
-    "category": "Household",
-    "price_fils": 2250,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/batteries.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "candles",
-    "name": "Candles, 4 pcs",
-    "category": "Household",
-    "price_fils": 995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/candles.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
@@ -1114,50 +498,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "toothbrushes",
-    "name": "Toothbrushes, 2 pcs",
-    "category": "Personal Care",
-    "price_fils": 1195,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/toothbrushes.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "razors",
-    "name": "Razors, 5 pcs",
-    "category": "Personal Care",
-    "price_fils": 1850,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/razors.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "plasters",
-    "name": "Plasters, 40 pcs",
-    "category": "Personal Care",
-    "price_fils": 795,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/plasters.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "baby-bottle",
-    "name": "Baby Bottle, 250 ml",
-    "category": "Baby & Kids",
-    "price_fils": 2995,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/baby-bottle.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "teddy-bear",
     "name": "Teddy Bear",
     "category": "Baby & Kids",
@@ -1169,28 +509,6 @@
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {
-    "sku": "crayons",
-    "name": "Crayons, 12 pcs",
-    "category": "Baby & Kids",
-    "price_fils": 1150,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/crayons.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "balloons",
-    "name": "Party Balloons, 20 pcs",
-    "category": "Baby & Kids",
-    "price_fils": 1250,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/balloons.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
     "sku": "dog-treats",
     "name": "Dog Treats, 200 g",
     "category": "Pets",
@@ -1199,17 +517,6 @@
     "min_age": 0,
     "fictional": true,
     "image_url": "/products/dog-treats.webp",
-    "image_credit": "Microsoft Fluent Emoji (MIT)"
-  },
-  {
-    "sku": "pet-yarn",
-    "name": "Cat Toy Yarn",
-    "category": "Pets",
-    "price_fils": 950,
-    "currency": "AED",
-    "min_age": 0,
-    "fictional": true,
-    "image_url": "/products/pet-yarn.webp",
     "image_credit": "Microsoft Fluent Emoji (MIT)"
   },
   {

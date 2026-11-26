@@ -2,23 +2,78 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { AddressBook } from './AddressBook.jsx'
 import {
-  accountApi, connectCarts, currentAccessToken, householdApi, logoutSession, onAccessTokenChanged, refreshAccessToken, restoreSession,
+  accountApi, childCodeRequestUnconfirmed, connectCarts, currentAccessToken, householdApi, logoutSession,
+  onAccessTokenChanged, refreshAccessToken, restoreSession,
 } from './api.js'
 import { DateOfBirthForm, GoogleAuthModal } from './Auth.jsx'
 import { CartView } from './CartDrawer.jsx'
-import { openCartQueue, SETTINGS, withTimeout } from './cartQueue.js'
+import { newKey, openCartQueue, SETTINGS, withTimeout } from './cartQueue.js'
 import { applyConfirmed, cartActivity, cartDifferences, cartQuantities, cartRows, combined, withOperations, withTaps } from './cartState.js'
 import { Checkout, OrderConfirmation } from './Checkout.jsx'
 import { isUnconfirmed, readAttempt, saveAttempt } from './checkoutState.js'
 import { AddressesPage, HouseholdPage } from './Household.jsx'
 import { openStore } from './operationStore.js'
 import { OrderHistory } from './OrderHistory.jsx'
+import { ProfileDialog } from './ProfileDialog.jsx'
 import { Landing, ShopPage } from './Shop.jsx'
 import { ListsPage } from './ShoppingLists.jsx'
-import { Avatar, confirmAction, ConfirmHost, Empty, Icon, money, Overlay } from './ui.jsx'
+import { Avatar, confirmAction, ConfirmHost, Empty, Icon, IconTile, money, Overlay } from './ui.jsx'
 import './styles.css'
 
 const clock = new Intl.DateTimeFormat('en-AE', { timeStyle: 'short' })
+const emptyCatalog = []
+
+function AccountMenu({ user, household, roleName, ready, childAccount, canSeeOrders, busy, onProfile, onPage, onSignOut }) {
+  const menu = useRef(null)
+  const trigger = useRef(null)
+  const firstName = user.display_name.trim().split(/\s+/)[0]
+
+  useEffect(() => {
+    function closeOutside(event) {
+      if (menu.current?.open && !menu.current.contains(event.target)) menu.current.open = false
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [])
+
+  function closeMenu() {
+    trigger.current?.focus({ preventScroll: true })
+    if (menu.current) menu.current.open = false
+  }
+
+  function action(icon, label, callback, props = {}) {
+    return <button type="button" {...props} onClick={() => { closeMenu(); callback() }}>
+      <IconTile name={icon} size={17} /><span>{label}</span>
+      {icon !== 'logout' && <Icon name="right" size={16} />}
+    </button>
+  }
+
+  return <details className="account-menu" ref={menu} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false
+  }} onKeyDown={(event) => {
+    if (event.key !== 'Escape' || !event.currentTarget.open) return
+    event.preventDefault()
+    closeMenu()
+  }}>
+    <summary ref={trigger} aria-label="Account">
+      <Avatar id={user.id} name={user.display_name} size="large" />
+      <span>Hi, {firstName || 'there'}</span><Icon name="chevron" size={15} />
+    </summary>
+    <div className="account-popover">
+      <div className="account-identity">
+        <Avatar id={user.id} name={user.display_name} size="large" />
+        <span><strong>{user.display_name}</strong>
+          {household && <small className="muted">{household.name} · {roleName}</small>}</span>
+      </div>
+      {ready && <div className="account-actions">
+        {!childAccount && action('user', 'Profile', onProfile, { 'aria-haspopup': 'dialog' })}
+        {canSeeOrders && action('orders', 'Order history', () => onPage('orders'))}
+        {action('people', household || childAccount ? 'Household' : 'Create or join a household', () => onPage('household'))}
+      </div>}
+      <div className="account-signout">{action('logout', 'Sign out', onSignOut, { disabled: busy })}</div>
+    </div>
+  </details>
+}
 
 function orderFromLocation() {
   return window.location.pathname.match(/^\/orders\/([a-z0-9-]+)\/?$/i)?.[1] ?? null
@@ -45,17 +100,23 @@ function App() {
   const [session, setSession] = useState(null)
   const [restoringSession, setRestoringSession] = useState(true)
   const [authOpen, setAuthOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const [view, setView] = useState('shop')
+  const [shopVisit, setShopVisit] = useState(0)
   const [household, setHousehold] = useState(null)
   const [households, setHouseholds] = useState([])
   const [carts, setCarts] = useState([])
-  const [products, setProducts] = useState([])
+  const [catalog, setProducts] = useState(null)
+  const products = catalog ?? emptyCatalog
   const [members, setMembers] = useState([])
   const [addresses, setAddresses] = useState([])
   const [invitation, setInvitation] = useState(null)
   // The cart being shopped. The catalogue and the cart drawer show the same one.
   const [cartId, setCartId] = useState(null)
   const [cart, setCart] = useState(null)
+  const [inventory, setInventory] = useState(null)
+  const [stockVersion, setStockVersion] = useState(0)
+  const [deliveryChoice, setDeliveryChoice] = useState(null)
   const [grants, setGrants] = useState([])
   const [picked, setSelected] = useState(() => new Set())
   // "Select all" also covers items that arrive afterwards, until something is unticked.
@@ -84,8 +145,9 @@ function App() {
   const currentUser = useRef(null)
   const searchInput = useRef(null)
   const requestIds = useRef(null)
+  const childCodeRequest = useRef(null)
   const leavingRef = useRef(null)
-  // { api, cartId } while this person is checking out.
+  const checkoutOpening = useRef(false)
   const checkoutSession = useRef(null)
   const drawerRef = useRef(null)
   drawerRef.current = drawer
@@ -104,6 +166,31 @@ function App() {
   const isPrimary = household?.role === 'primary'  // the admin
   const account = useMemo(() => token ? accountApi(token) : null, [token])
   const api = useMemo(() => token && householdId ? householdApi(token, householdId) : null, [token, householdId])
+  const storeId = cart?.id === cartId ? cart?.inventory_store_id : null
+  const refreshInventory = useCallback(() => setStockVersion((version) => version + 1), [])
+  const currentInventory = inventory && inventory.api === api && inventory.cartId === cartId && inventory.result.store_id === storeId
+    ? inventory.result : null
+  const stock = currentInventory?.stock
+
+  useEffect(() => {
+    if (!api || !cartId || !storeId) return
+    const controller = new AbortController()
+    api.cartInventory(cartId, controller.signal).then((result) => {
+      if (controller.signal.aborted) return
+      if (result.store_id !== storeId) {
+        reloadCart(cartId)
+        return
+      }
+      setInventory({ api, cartId, result })
+    }).catch(() => {
+      if (!controller.signal.aborted) setInventory({ api, cartId, result: { store_id: storeId, failed: true } })
+    })
+    window.addEventListener('focus', refreshInventory)
+    return () => {
+      window.removeEventListener('focus', refreshInventory)
+      controller.abort()
+    }
+  }, [api, cartId, storeId, stockVersion, refreshInventory])
 
   useEffect(() => {
     productNames.current = new Map(products.map((product) => [product.sku, product.name]))
@@ -111,7 +198,8 @@ function App() {
 
   const showPopup = useCallback((text, kind = 'info') => {
     const notice = { id: ++noticeSequence.current, text, kind, at: new Date() }
-    setNotices((current) => [...current, notice].slice(-3))
+    setNotices((current) => kind === 'error' && current.some((item) => item.kind === kind && item.text === text)
+      ? current : [...current, notice].slice(-3))
     if (kind === 'activity') {
       setActivity((current) => [notice, ...current].slice(0, 50))
       if (drawerRef.current !== 'activity') setUnread((count) => count + 1)
@@ -123,19 +211,22 @@ function App() {
     editRevision.current = 0
     alreadyApplied.current.clear()
     setCart(null); setGrants([]); setSelected(new Set()); setAllSelected(false)
+    setInventory(null); setDeliveryChoice(null)
   }
 
   function clearSession() {
     currentUser.current = null
+    childCodeRequest.current = null
     // What is unconfirmed stays stored on this device for this person's next sign-in.
     queue.current?.stop()
     queue.current = null
     setOperations([]); setSuccessors({})
     forgetCart()
-    setSession(null); setHousehold(null); setHouseholds([]); setCarts([]); setProducts([]); setMembers([])
+    setSession(null); setHousehold(null); setHouseholds([]); setCarts([]); setProducts(null); setMembers([])
     setAddresses([]); setInvitation(null); setCartId(null); setCheckoutCart(null); setPendingOrder(null); setMemberRequests([])
     setConfirmation(null); setOrderError(null); setNotices([]); setActivity([]); setUnread(0)
     setDrawer(null); setQuery(''); setView('shop')
+    setProfileOpen(false)
   }
 
   useEffect(() => onAccessTokenChanged((nextToken, refreshedUser) => {
@@ -145,15 +236,20 @@ function App() {
       queue.current?.signedIn()
       setSession((current) => current && {
         ...current, access_token: nextToken,
-        user: refreshedUser ? { ...current.user, is_adult: refreshedUser.is_adult } : current.user,
+        user: refreshedUser ? {
+          ...current.user, display_name: refreshedUser.display_name, is_adult: refreshedUser.is_adult,
+          email: refreshedUser.email ?? current.user.email,
+        } : current.user,
       })
     }
   }), [])
 
   async function loadHousehold(chosen, accessToken = token) {
+    if (chosen?.id !== householdId) childCodeRequest.current = null
     if (!chosen) {
       forgetCart()
       setHousehold(null); setCarts([]); setMembers([]); setAddresses([]); setCartId(null); setMemberRequests([])
+      setInvitation(null)
       setProducts(await accountApi(accessToken).products())
       setSession((current) => current && { ...current, is_adult: current.user.is_adult, age_status: undefined })
       return
@@ -301,6 +397,7 @@ function App() {
             showPopup(`Items added during checkout are in ${started.name}.`, 'activity')
           }
           waitingBefore = snapshot.cart.waiting?.length ?? 0
+          if (snapshot.ordered_by) refreshInventory()
           previous = combined(snapshot.cart)
           showCart({ ...snapshot.cart, revision: snapshot.revision, applied: snapshot.applied })
           if (snapshot.grants) setGrants(snapshot.grants)
@@ -364,11 +461,13 @@ function App() {
     if (!checkingOut) return
     const renew = window.setInterval(() => {
       const session = checkoutSession.current
-      session?.api.startCheckout(session.cartId).catch((error) => {
+      session?.api.renewCheckout(session.cartId, session.key, session.userId).catch((error) => {
+        if (checkoutSession.current !== session) return
         if (!error.status || error.status >= 500 || error.status === 401) return
         checkoutSession.current = null
         setCheckoutCart(null)
         setDrawer((open) => open === 'checkout' ? 'cart' : open)
+        if (cartIdRef.current === session.cartId) reloadCart(session.cartId)
         showPopup(error.message, 'error')
       })
     }, 60000)
@@ -475,6 +574,7 @@ function App() {
     checkoutSession.current = null  // finished, not abandoned
     resolveOrder(placed.order_id)
     setConfirmation(placed)
+    refreshInventory()
     setSelected(new Set())
     if (attempt.cart.household_id !== householdId) return
     const next = placed.next_cart
@@ -490,6 +590,39 @@ function App() {
       if (error.status === 401) clearSession()
       showPopup(error.message, 'error')
     } finally { setBusy(false) }
+  }
+
+  async function saveUsername(name) {
+    const { display_name: saved } = await account.saveUsername(name, userId)
+    if (currentUser.current === userId) {
+      setSession((current) => current?.user.id === userId
+        ? { ...current, user: { ...current.user, display_name: saved } } : current)
+      setMembers((current) => current.map((member) => member.id === userId ? { ...member, display_name: saved } : member))
+    }
+    return saved
+  }
+
+  function issueChildCode(memberId) {
+    const pending = childCodeRequest.current
+    if (pending?.inFlight) return
+    const key = pending && pending.memberId === memberId ? pending.key : crypto.randomUUID()
+    const attempt = { memberId, key, inFlight: true }
+    childCodeRequest.current = attempt
+
+    return run(async () => {
+      try {
+        const code = await api.createChildCode(memberId, key)
+        if (childCodeRequest.current === attempt) {
+          childCodeRequest.current = null
+          setInvitation({ ...code, child: true })
+        }
+      } catch (error) {
+        if (childCodeRequest.current !== attempt) return
+        if (childCodeRequestUnconfirmed(error)) attempt.inFlight = false
+        else childCodeRequest.current = null
+        throw error
+      }
+    })
   }
 
   /**
@@ -519,8 +652,20 @@ function App() {
       if (cart && Boolean(cart.checkout) !== update.waiting) reloadCart(update.cart_id)
     },
     failed(operation, error) {
-      showPopup(error.message, 'error')
-      if (operation.householdId === householdId && cartIdRef.current) reloadCart(cartIdRef.current)
+      const local = operation.householdId === householdId && unconfirmedHere(operation)
+      const detail = error.detail
+      const shortage = error.code === 'OUT_OF_STOCK' && detail?.store_id === storeId && local
+      const current = shortage ? shownQuantity(operation.sku) + (locked ? inCart[operation.sku] ?? 0 : 0) : 0
+      const message = error.code === 'OUT_OF_STOCK' ? `Out of stock. ${error.message}` : error.message
+      showPopup(shortage && current > 0 ? `${message} Your cart already has ${current}.` : message, 'error')
+      if (shortage) setInventory((previous) => {
+        if (previous?.api !== api || previous.cartId !== cartId || previous.result.store_id !== storeId || !previous.result.stock) return previous
+        return { ...previous, result: { ...previous.result, stock: { ...previous.result.stock, [detail.sku]: detail.available } } }
+      })
+      if (local && cartIdRef.current) {
+        reloadCart(cartIdRef.current)
+        refreshInventory()
+      }
     },
     cart(operation, created) {
       if (operation.householdId !== householdId) return
@@ -582,13 +727,24 @@ function App() {
   const adjustState = useRef(null)
   const adjust = useCallback((product, delta) => adjustState.current(product, delta), [])
   adjustState.current = ({ sku }, delta) => {
-    if ((queue.current ? shownQuantity(sku) : 0) + delta < 0) return
+    if (!queue.current || !cartId || !cart?.can_edit_items) return
+    const changingQuantity = shownQuantity(sku)
+    if (changingQuantity + delta < 0) return
+    if (delta > 0) {
+      if (!stock) return
+      const frozen = locked ? inCart[sku] ?? 0 : 0
+      const available = stock[sku] ?? 0
+      if (frozen + changingQuantity + delta > available) {
+        showPopup(available > 0 ? `Out of stock. Only ${available} available at this store.` : 'Out of stock.', 'error')
+        return
+      }
+    }
     queue.current?.adjust({ householdId, cartId, sku, delta })
   }
 
   /** Also right between two taps, before React has drawn the first one. */
   function shownQuantity(sku) {
-    const latest = queue.current.operations().filter((item) => item.sku === sku && unconfirmedHere(item))
+    const latest = (queue.current?.operations() ?? []).filter((item) => item.sku === sku && unconfirmedHere(item))
     return withOperations(cartQuantities(changing), latest)[sku] ?? 0
   }
 
@@ -662,16 +818,53 @@ function App() {
     setDrawer(next)
   }
 
+  function setDelivery(addressId) {
+    return run(async () => {
+      const id = cartIdRef.current
+      await saveChanges(unconfirmedHere, 'Try setting delivery again in a moment.')
+      const saved = await api.setCartStore(id, addressId)
+      if (cartIdRef.current !== id) return
+      setDeliveryChoice({ cartId: id, addressId })
+      setCarts((current) => current.map((item) => item.id === id ? {
+        ...item, inventory_store_id: saved.inventory_store_id, inventory_store_name: saved.inventory_store_name,
+      } : item))
+      showCart(saved)
+      refreshInventory()
+      return saved
+    })
+  }
+
   /** Save what is waiting, bring the cart up to date, and only then open checkout. */
-  async function startCheckout() {
-    await run(async () => {
+  function startCheckout() {
+    if (checkoutOpening.current) return
+    checkoutOpening.current = true
+    const id = cartIdRef.current
+    const here = () => id === cartIdRef.current && drawerRef.current === 'cart' && currentUser.current === userId
+    return run(async () => {
       // Nobody should pay for a cart that is not what they see.
       await saveChanges(unconfirmedHere, 'Try checkout again in a moment.')
-      const id = cartIdRef.current
+      if (!here()) return
       const everything = available.every((row) => selected.has(row.sku))
-      const fresh = await api.startCheckout(id)
-      checkoutSession.current = { api, cartId: id }
-      if (cartIdRef.current !== id) { endCheckout(); return }
+      const key = newKey()
+      let fresh
+      try {
+        fresh = await api.startCheckout(id, key, userId)
+      } catch (error) {
+        if (!here()) return
+        if (error.code === 'CHECKOUT_IN_PROGRESS') {
+          const { checkout, revision } = error.detail
+          if (checkout) setCart((shown) => shown?.id === id && editRevision.current <= revision
+            ? { ...shown, checkout } : shown)
+          reloadCart(id)
+        }
+        throw error
+      }
+      checkoutSession.current = { api, cartId: id, key, userId }
+      if (!here()) { endCheckout(); return }
+      if (fresh.revision < editRevision.current) {
+        fresh = await reloadCart(id)
+        if (!here() || fresh?.checkout?.user_id !== userId) { endCheckout(); return }
+      }
       const listed = new Set(fresh.contributions.map((row) => row.sku))
       const chosen = new Set([...(everything ? listed : selected)].filter((sku) => listed.has(sku) && bySku.has(sku)))
       setCheckoutChanges(cartDifferences(cart.contributions, fresh.contributions, productNames.current))
@@ -685,20 +878,21 @@ function App() {
       }
       setCheckoutCart({ kind: 'household', household_id: householdId, cart_id: id })
       setDrawer('checkout')
-    })
+    }).finally(() => { checkoutOpening.current = false })
   }
 
   function endCheckout() {
     const session = checkoutSession.current
     if (!session) return
     checkoutSession.current = null
-    session.api.leaveCheckout(session.cartId).then(() => {
+    session.api.leaveCheckout(session.cartId, session.key, session.userId).then(() => {
       if (cartIdRef.current === session.cartId) return reloadCart(session.cartId)
     }).catch(() => { /* it runs out by itself within a few minutes */ })
   }
 
   const ownAddress = addresses.find((address) => address.created_by === userId)
-  const needsOwnAddress = household && !ownAddress
+  const childAccount = Boolean(session?.user.is_child_account)
+  const needsOwnAddress = household && !childAccount && !ownAddress
   const available = rows.filter((row) => row.product)
   const selected = allSelected ? new Set(available.map((row) => row.sku)) : picked
   const itemCount = [...rows, ...waitingRows].reduce((total, row) => total + row.quantity, 0)
@@ -714,54 +908,54 @@ function App() {
   // Admin: owns the household. Primary user: a member approved as an adult. Everyone else is a child user.
   const isAdult = session?.is_adult ?? session?.user.is_adult
   const roleName = isPrimary ? 'Admin' : isAdult ? 'Primary user' : 'Child user'
-  const checkoutBy = !cart?.checkout ? null : cart.checkout.user_id === userId ? 'You' : names.get(cart.checkout.user_id) ?? 'Another member'
+  const checkoutBy = !cart?.checkout ? null : cart.checkout.user_id === userId ? 'You'
+    : cart.checkout.display_name ?? names.get(cart.checkout.user_id) ?? 'Another member'
   const shop = {
     quantities, cartId, needsHousehold: !household, adultsOnly: Boolean(cart?.adults_only),
-    canEdit: cart ? cart.can_edit_items !== false : isPrimary && carts.length === 0, canRemove: removable, onAdjust: adjust, unresolved,
+    canEdit: Boolean(cart?.can_edit_items), canRemove: removable, onAdjust: adjust, unresolved, stock,
+    storeName: cart?.inventory_store_name, canSetStore: cart?.can_checkout, inventoryFailed: currentInventory?.failed,
+    retryInventory: refreshInventory,
   }
   const page = showOrderHistory || orderId ? 'orders' : view
   const ready = session && !needsAgeSetup && !restoringSession
   return <>
     <header className="site-header">
       <div className="header-row shell">
-        <button className="brand" onClick={() => openPage('shop')}>familycart</button>
-        {ready && household && <button className="location" onClick={() => openPage('addresses')}>
-          <Icon name="pin" size={20} /><span><strong>Delivery in minutes</strong>
+        <button className="brand" aria-label="FamilyCart shop" onClick={() => {
+          setQuery('')
+          if (page === 'shop') setShopVisit((current) => current + 1)
+          openPage('shop')
+        }}><Icon name="cart" size={27} />familycart</button>
+        {ready && household && !childAccount && <button className="location" aria-label="Delivery addresses"
+          aria-current={page === 'addresses' || needsOwnAddress ? 'page' : undefined} onClick={() => openPage('addresses')}>
+          <Icon name="pin" size={20} /><span><strong>Deliver to</strong>
             <small>{ownAddress ? `${ownAddress.label} · ${ownAddress.city}` : 'Add an address'}</small></span><Icon name="chevron" size={16} />
         </button>}
-        {ready ? <label className="search"><Icon name="search" size={18} />
-          <input ref={searchInput} type="search" placeholder="Search for milk, eggs, bread" aria-label="Search products" value={query}
+        {ready && !needsOwnAddress ? <label className="search"><Icon name="search" size={18} />
+          <input ref={searchInput} type="search" placeholder="Search for milk, eggs, bread and more…" aria-label="Search products" value={query}
             onChange={(event) => {
               if (page !== 'shop') openPage('shop')
               setQuery(event.target.value)
             }} /></label> : <span className="spacer" />}
-        {ready && <>
-          <button className={`icon-button wishlist${page === 'lists' ? ' on' : ''}`} aria-label="Wishlist and shopping lists" title="Wishlist"
-            aria-current={page === 'lists' ? 'page' : undefined} onClick={() => openPage('lists')}><Icon name="heart" /></button>
-          <button className="icon-button bell" aria-label={`Activity${unread ? `, ${unread} new` : ''}`} onClick={() => openDrawer('activity')}>
-            <Icon name="bell" />{unread > 0 && <span className="badge">{unread > 9 ? '9+' : unread}</span>}</button>
-          {household && <button className="cart-button" onClick={() => openDrawer('cart')} aria-label={`Open cart, ${itemCount} ${itemCount === 1 ? 'item' : 'items'}`}>
-            <Icon name="cart" /><span key={itemCount}>{itemCount > 0 ? <><strong>{itemCount}</strong> <small>{money(cartTotal)}</small></> : 'Cart'}</span></button>}
-        </>}
-        {session ? <details className="account-menu" onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false
-        }}>
-          <summary aria-label="Account"><Avatar id={userId} name={session.user.display_name} size="large" /></summary>
-          <div onClick={(event) => { if (event.target.closest('button')) event.currentTarget.closest('details').open = false }}>
-            <strong>{session.user.display_name}</strong>
-            {household && <small className="muted">{household.name} · {roleName}</small>}
-            {ready && <><button onClick={() => openPage('shop')}>Shop</button>
-              <button onClick={() => openPage('lists')}>Wishlist and lists</button>
-              {household && <button onClick={() => openPage('addresses')}>Addresses</button>}
-              {(isPrimary || isAdult) && <button onClick={() => openPage('orders')}>Order history</button>}
-              <button onClick={() => openPage('household')}>{household ? 'Household' : 'Create or join a household'}</button></>}
-            <button disabled={busy} onClick={() => run(async () => {
+        <div className="header-tools">
+          {ready && !needsOwnAddress && <>
+            <button className={`icon-button wishlist${page === 'lists' ? ' on' : ''}`} aria-label="Shopping lists" title="Shopping lists"
+              aria-current={page === 'lists' ? 'page' : undefined} onClick={() => openPage('lists')}><Icon name="heart" /></button>
+            <button className="icon-button bell" aria-label={`Activity${unread ? `, ${unread} new` : ''}`} onClick={() => openDrawer('activity')}>
+              <Icon name="bell" />{unread > 0 && <span className="badge">{unread > 9 ? '9+' : unread}</span>}</button>
+          </>}
+          {session ? <AccountMenu user={session.user} household={household} roleName={roleName} ready={ready}
+            childAccount={childAccount} canSeeOrders={isPrimary || isAdult} busy={busy} onProfile={() => setProfileOpen(true)}
+            onPage={openPage} onSignOut={() => run(async () => {
               await queue.current?.seal()
               await logoutSession(token)
               clearSession()
-            })}>Sign out</button>
-          </div>
-        </details> : !restoringSession && <button onClick={() => setAuthOpen(true)}>Login / Register</button>}
+            })} /> : !restoringSession && <button onClick={() => setAuthOpen(true)}>Log in</button>}
+          {ready && household && !needsOwnAddress && <button className="cart-button" onClick={() => openDrawer('cart')}
+            aria-label={`Open cart, ${itemCount} ${itemCount === 1 ? 'item' : 'items'}`}>
+            <Icon name="cart" size={19} /><span>{itemCount > 0 ? <><strong>{itemCount}</strong><span className="cart-button-total"> {itemCount === 1 ? 'item' : 'items'} · {money(cartTotal)}</span></> : 'Cart'}</span>
+          </button>}
+        </div>
       </div>
     </header>
 
@@ -774,7 +968,7 @@ function App() {
     </div>}
 
     <main className="shell">
-      {ready && page !== 'shop' && !needsOwnAddress && <button className="text-button back-to-shop" onClick={() => openPage('shop')}>← Back to shop</button>}
+      {ready && page !== 'shop' && !needsOwnAddress && <button className="text-button back-to-shop" onClick={() => openPage('shop')}><Icon name="back" size={16} /> Back to shop</button>}
       {ready && pendingOrder && drawer !== 'checkout' && <div className="banner row" role="status">
         <span><strong>Your last order was not confirmed</strong><p>Check whether it went through before ordering again.</p></span>
         <button onClick={() => { setCheckoutCart(pendingOrder.cart); setDrawer('checkout') }}>Resume checkout</button>
@@ -795,11 +989,12 @@ function App() {
         showOrderHistory ? <OrderHistory key={userId} account={account} onOpen={openOrder} onShop={() => openPage('shop')} /> :
         orderId ? <OrderConfirmation error={orderError} onBack={() => openPage('orders')} onShop={() => openPage('shop')} products={bySku}
           order={confirmation?.order_id === orderId && confirmation.purchaser_id === userId ? confirmation : null} /> :
-        needsOwnAddress || (view === 'addresses' && household) ?
+        needsOwnAddress || (view === 'addresses' && household && !childAccount) ?
           <AddressesPage key={household.id} required={Boolean(needsOwnAddress)} household={household} userId={userId} members={members} {...addressBook} /> :
         view === 'lists' ? <ListsPage account={account} api={api} token={token} household={household} user={session.user} products={products}
           carts={carts} defaultCartId={cartId} onBack={() => openPage('shop')} onNotify={showPopup}
-          onCartChanged={(id) => { if (id === cartId) reloadCart(id) }}
+          onConfigureCart={(id) => { selectCart(id); openDrawer('cart') }}
+          onCartChanged={(id) => { if (id === cartId) { reloadCart(id); refreshInventory() } }}
           onAccessLost={(reason) => {
             setView('shop')
             showPopup(reason || 'Your household access was revoked. Contact the household admin.', 'error')
@@ -842,6 +1037,7 @@ function App() {
             queue.current?.seal()
             await loadHousehold(households.find((item) => item.id === id))
           })}
+          onChildCode={issueChildCode}
           onInvite={() => run(async () => setInvitation(await api.createInvitation()))}
           onRevoke={(id) => run(async () => { await api.revokeMember(id); await refreshMembers() })}
           onDecideAge={(id, approved) => run(async () => {
@@ -857,7 +1053,7 @@ function App() {
             showPopup('Household ownership transferred.')
           })}
           onOpenAddresses={() => openPage('addresses')} onOpenLists={() => openPage('lists')} onOpenCart={() => openDrawer('cart')} /> :
-        <ShopPage products={products} loading={products.length === 0} query={query} onClearQuery={() => setQuery('')} shop={shop} carts={carts}
+        <ShopPage key={shopVisit} childAccount={childAccount} products={products} loading={catalog === null} query={query} onClearQuery={() => setQuery('')} shop={shop} carts={carts}
           household={household} roleName={roleName} checkoutBy={checkoutBy} userName={session.user.display_name} listApis={listApis} onSelectCart={selectCart}
           peopleFor={(sku) => (cart ? combined(cart) : []).filter((row) => row.sku === sku).map((row) => ({
             name: row.contributor_id === userId ? 'You' : names.get(row.contributor_id) ?? 'Member', quantity: row.quantity,
@@ -876,14 +1072,20 @@ function App() {
         {drawer === 'activity' ? <ActivityList activity={activity} onClear={() => setActivity([])} /> :
           drawer === 'checkout' && checkoutCart ? <Checkout key={checkoutCart.cart_id} account={account} cart={checkoutCart} pending={pendingOrder}
             onPlace={submitOrder} onOpenOrder={resolveOrder} isAdult={session.is_adult ?? session.user.is_adult}
-            allowed={householdId === checkoutCart.household_id && cart?.id === checkoutCart.cart_id && Boolean(cart.can_checkout)}
+            allowed={householdId === checkoutCart.household_id && cart?.id === checkoutCart.cart_id
+              && cart.can_checkout && cart.checkout?.user_id === userId}
             changes={checkoutChanges} waiting={waitingRows}
-            rows={available.filter((row) => selected.has(row.sku))} user={session.user}
-            names={names} products={bySku} addresses={checkoutAddresses}
+            rows={available.filter((row) => selected.has(row.sku))} products={bySku} addresses={checkoutAddresses}
+            preferredAddress={deliveryChoice?.cartId === cartId ? deliveryChoice.addressId : null}
+            onStockConflict={refreshInventory}
+            onBackToCart={() => { setCheckoutCart(null); setDrawer('cart') }}
             editor={api && <AddressBook {...addressBook} buttonLabel="Save address" />} /> :
           <CartView carts={carts} cart={cart} cartId={cartId} rows={rows} user={session.user} household={household} members={members} names={names}
             grants={grants} selected={selected} busy={busy} live={live} unresolved={unresolved}
             canAdultsOnly={session.can_create_adults_only_cart} waitingRows={waitingRows} checkoutBy={checkoutBy}
+            stock={stock} quantities={quantities} inventoryFailed={currentInventory?.failed} onRetryInventory={refreshInventory}
+            addresses={checkoutAddresses} preferredAddress={deliveryChoice?.cartId === cartId ? deliveryChoice.addressId : null}
+            onSetDelivery={setDelivery} onManageAddresses={() => openPage('addresses')}
             mine={cart?.checkout?.user_id === userId} canRemove={removable} onEndCheckout={() => run(async () => {
               await api.leaveCheckout(cartId)
               await reloadCart(cartId)
@@ -933,6 +1135,8 @@ function App() {
         setAuthOpen(false)
         showPopup('Welcome back.')
       })} />}
+    {ready && profileOpen && !childAccount && <ProfileDialog user={session.user}
+      household={household} roleName={roleName} onSave={saveUsername} onClose={() => setProfileOpen(false)} />}
     <ConfirmHost />
   </>
 }

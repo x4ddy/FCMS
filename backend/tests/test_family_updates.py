@@ -90,6 +90,8 @@ class AgeApprovalTests(FamilyCase):
         self.assertFalse(self.sees_adult_products(self.m))
         self.assertEqual(self.call("GET", f"{self.root}/capabilities", self.m)["age_status"], "PENDING")
         adults_only = self.call("POST", f"{self.root}/carts", self.p, 201, name="Party", adults_only=True)["id"]
+        with transaction(app.state.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (adults_only,))
         self.call("PUT", f"{self.root}/carts/{adults_only}/grants/m", self.p, 403)
 
         self.decide("m", True)
@@ -276,6 +278,8 @@ class MyListTests(FamilyCase):
 
     def test_only_the_chosen_items_go_to_the_household_cart(self):
         cart = self.call("GET", f"{self.root}/carts", self.p)[0]["id"]
+        with transaction(app.state.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (cart,))
         for base, extra in (("/my-lists", {"household_id": self.root.split("/")[-1]}), (f"{self.root}/lists", {})):
             path = f"{base}/{self.call('POST', base, self.m, 201, name='L')['id']}"
             rows = self.call("POST", f"{path}/items/bulk", self.m, 201, items=[{"sku": "milk"}, {"sku": "eggs"}, {"sku": "bread"}])["items"]

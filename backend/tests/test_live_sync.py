@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.services.familycart_service import live_sync
 from backend.services.familycart_service.app import app, live_view
+from backend.services.familycart_service.db import transaction
 from backend.services.familycart_service.lists import lists_view
 from backend.shared.database import DatabaseConnection
 from backend.shared.tokens import Identity, issue_token
@@ -129,6 +130,8 @@ class LiveSyncTests(unittest.TestCase):
             })
         self.client.put(f"{self.root}/members/{self.member_id}/age", headers=self.primary, json={"approved": True})
         [self.cart] = self.client.get(f"{self.root}/carts", headers=self.primary).json()
+        with transaction(app.state.db_path, write=True) as db:
+            db.execute("UPDATE carts SET inventory_store_id = 'uae-dubai' WHERE id = ?", (self.cart["id"],))
         self.go_online()
         self.sync.tick()  # flush setup changes
         self.fake.published.clear()

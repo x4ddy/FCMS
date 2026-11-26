@@ -27,10 +27,10 @@ from backend.shared.database import DatabaseConnection
 from backend.shared.tokens import Identity, verify_token
 
 from .app import (
-    MAX_QUANTITY, Caller, CartResponse, household_access, record_cart_change, require_product_for_cart,
+    Caller, CartResponse, household_access, record_cart_change, require_product_for_cart,
     change_waiting, require_visible_cart, shared_quantity, viewer_age, visible_product,
 )
-from . import checkout_session
+from . import checkout, checkout_session
 from .operations import Operation, OperationKey
 from .db import ITEM_COLUMNS, ITEM_JOINS, LIST_COLUMNS, contribution_quantity, set_contribution
 from .live_sync import AccessEnded, notify_changed, viewer_role
@@ -509,19 +509,24 @@ def add_rows_to_cart(
             continue
         try:
             require_product_for_cart(request, row["sku"], caller, cart)
+            in_cart = shared_quantity(db, cart.id, row["sku"])
             if session is not None:
-                in_cart = shared_quantity(db, cart.id, row["sku"])
                 change_waiting(
-                    db, household_id, cart.id, row["sku"], row["quantity"], caller, False, session, in_cart=in_cart,
+                    db, household_id, cart, row["sku"], row["quantity"], caller, False, session, in_cart=in_cart,
                 )
             else:
+                checkout.require_stock(db, cart.inventory_store_id, row["sku"], in_cart + row["quantity"])
                 current = contribution_quantity(db, cart.id, row["sku"], caller.user_id)
                 set_contribution(
                     db, household_id, cart.id, row["sku"], caller.user_id,
-                    min(MAX_QUANTITY, current + row["quantity"]),
+                    current + row["quantity"],
                 )
         except HTTPException as error:
-            skipped.append(SkippedItem(id=item_id, reason=str(error.detail)))
+            detail = error.detail
+            reason = detail["message"] if isinstance(detail, dict) else str(detail)
+            if isinstance(detail, dict) and detail.get("code") == "OUT_OF_STOCK":
+                reason = f"Out of stock. {reason}"
+            skipped.append(SkippedItem(id=item_id, reason=reason))
             continue
         moved.append(item_id)
     if moved and session is not None:

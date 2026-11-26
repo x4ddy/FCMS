@@ -71,6 +71,8 @@ class FirstSliceTests(unittest.TestCase):
                     "can_edit_items": True,
                     "can_manage_access": True,
                     "can_checkout": True,
+                    "inventory_store_id": None,
+                    "inventory_store_name": None,
                 },
                 {
                     "id": "regular-cart",
@@ -79,6 +81,8 @@ class FirstSliceTests(unittest.TestCase):
                     "can_edit_items": True,
                     "can_manage_access": True,
                     "can_checkout": True,
+                    "inventory_store_id": None,
+                    "inventory_store_name": None,
                 },
             ],
         )

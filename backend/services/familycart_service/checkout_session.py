@@ -33,7 +33,7 @@ def expired(session, now: datetime | None = None) -> bool:
 def stored_session(db: DatabaseConnection, cart_id: str):
     """The session row as saved, which may have run out."""
     return db.execute(
-        "SELECT cart_id, user_id, expires_at FROM checkout_sessions WHERE cart_id = ?", (cart_id,),
+        "SELECT cart_id, household_id, user_id, started_at, expires_at FROM checkout_sessions WHERE cart_id = ?", (cart_id,),
     ).fetchone()
 
 
@@ -54,14 +54,14 @@ def current_session(db: DatabaseConnection, household_id: str, cart_id: str):
     return session
 
 
-def save_session(db: DatabaseConnection, household_id: str, cart_id: str, user_id: str) -> None:
+def save_session(db: DatabaseConnection, household_id: str, cart_id: str, user_id: str) -> str:
     now = now_utc()
-    db.execute(
+    return db.execute(
         """INSERT INTO checkout_sessions (cart_id, household_id, user_id, started_at, expires_at)
            VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT (cart_id) DO UPDATE SET user_id = excluded.user_id, expires_at = excluded.expires_at""",
+           ON CONFLICT (cart_id) DO UPDATE SET expires_at = excluded.expires_at RETURNING started_at""",
         (cart_id, household_id, user_id, now.isoformat(), (now + SESSION_LENGTH).isoformat()),
-    )
+    ).fetchone()["started_at"]
 
 
 def waiting_rows(db: DatabaseConnection, cart_id: str) -> list[dict]:
@@ -132,7 +132,7 @@ def finish_session(db: DatabaseConnection, household_id: str, cart_id: str) -> d
     if not waiting_rows(db, cart_id):
         return None
     old = db.execute(
-        "SELECT creator_id, name, adults_only, creator_revoked FROM carts WHERE id = ?", (cart_id,),
+        "SELECT creator_id, name, adults_only, creator_revoked, inventory_store_id FROM carts WHERE id = ?", (cart_id,),
     ).fetchone()
     emptied = db.execute(
         "SELECT 1 FROM cart_item_contributions WHERE cart_id = ? LIMIT 1", (cart_id,),
@@ -140,9 +140,9 @@ def finish_session(db: DatabaseConnection, household_id: str, cart_id: str) -> d
     new_id = str(uuid4())
     name = old["name"] if emptied else unused_name(db, household_id, old["name"])
     db.execute(
-        """INSERT INTO carts (id, household_id, creator_id, name, adults_only, creator_revoked)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (new_id, household_id, old["creator_id"], name, old["adults_only"], old["creator_revoked"]),
+        """INSERT INTO carts (id, household_id, creator_id, name, adults_only, creator_revoked, inventory_store_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (new_id, household_id, old["creator_id"], name, old["adults_only"], old["creator_revoked"], old["inventory_store_id"]),
     )
     db.execute(
         """INSERT INTO cart_grants (household_id, cart_id, member_id)

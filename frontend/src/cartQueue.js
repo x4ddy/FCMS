@@ -5,6 +5,7 @@ const DAY = 24 * 60 * 60 * 1000
 
 export const SETTINGS = {
   debounce: 400,
+  maxBatchWait: 750,     // from the first tap, even if taps keep coming
   timeout: 5000,        // per request
   baseDelay: 1000,
   multiplier: 2,
@@ -151,15 +152,17 @@ export function createCartQueue({
 
   /** Taps on one product within the debounce time become one change. Once it closes it is never altered. */
   function adjust({ householdId, cartId, sku, delta }) {
+    const tappedAt = now()
     const last = operations.findLast((item) => item.householdId === householdId && item.sku === sku)
-    const open = last && own.has(last.requestId) && last.kind === 'adjust' && !last.sealed && now() < last.readyAt
+    const open = last && own.has(last.requestId) && last.kind === 'adjust' && !last.sealed && tappedAt < last.readyAt
       && last.cartId === cartId && Math.abs(last.delta + delta) <= 99
     if (!open) {
-      add({ kind: 'adjust', householdId, cartId, sku, delta, sealed: false, readyAt: now() + settings.debounce })
+      const readyAt = tappedAt + Math.min(settings.debounce, settings.maxBatchWait)
+      add({ kind: 'adjust', householdId, cartId, sku, delta, sealed: false, readyAt })
       return
     }
     last.delta += delta
-    last.readyAt = now() + settings.debounce
+    last.readyAt = Math.min(tappedAt + settings.debounce, last.createdAt + settings.maxBatchWait)
     if (last.delta === 0) {
       // Tapped back to where it was: nothing to save, and nothing was sent.
       take(last.requestId)
@@ -360,7 +363,9 @@ export function createCartQueue({
   function fail(operation, error) {
     if (!take(operation.requestId)) return
     forget(operation.requestId)
-    broadcast({ type: 'failed', id: operation.requestId, operation, error: { message: error.message, status: error.status } })
+    broadcast({ type: 'failed', id: operation.requestId, operation, error: {
+      message: error.message, status: error.status, code: error.code, detail: error.detail,
+    } })
     onFailed(operation, error)
     changed()
   }

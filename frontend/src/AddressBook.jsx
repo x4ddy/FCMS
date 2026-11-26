@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { DeliveryMap } from './DeliveryMap.jsx'
-import { confirmAction, Icon } from './ui.jsx'
+import { confirmAction, Icon, IconTile } from './ui.jsx'
 
 function coordinateFields(pin) {
   return { latitude: String(pin?.latitude ?? ''), longitude: String(pin?.longitude ?? '') }
@@ -109,11 +109,16 @@ function PinCoverage({ api, fields, onChange, addressId, busy, emptyMessage = 'A
   const error = current?.error
 
   return <div className="delivery-pin-panel">
-    {editable && <p className="muted">Click the map, drag the address pin, or enter coordinates.</p>}
     <DeliveryMap stores={stores} latitude={pin?.latitude ?? null} longitude={pin?.longitude ?? null}
       selectedStore={result?.store_id}
       onDragStart={startDrag}
       onPick={editable && !busy ? ({ lat, lng }) => changeFields(coordinateFields({ latitude: lat, longitude: lng })) : null} />
+    {editable && <div className="delivery-map-status">
+      <p>Tap the map, drag the pin, or enter coordinates.</p>
+      <button type="button" className="text-button" disabled={busy || locating} onClick={useLocation}>
+        <Icon name="pin" size={16} />{locating ? 'Locating…' : 'Use my location'}
+      </button>
+    </div>}
     {storeLookupFailed && <div className="delivery-map-status">
       <p role="status">Store markers could not load.</p>
       <button type="button" className="text-button" onClick={() => setStoreAttempt((current) => current + 1)}>Retry stores</button>
@@ -123,9 +128,6 @@ function PinCoverage({ api, fields, onChange, addressId, busy, emptyMessage = 'A
         value={fields.latitude} onChange={(event) => changeFields({ ...fields, latitude: event.target.value })} /></label>
       <label>Longitude<input type="number" min="-180" max="180" step="any" disabled={busy}
         value={fields.longitude} onChange={(event) => changeFields({ ...fields, longitude: event.target.value })} /></label>
-      <button type="button" className="secondary" disabled={busy || locating} onClick={useLocation}>
-        {locating ? 'Reading location…' : 'Use my location'}
-      </button>
     </div>}
     {locationError && <p className="muted" role="status">{locationError}</p>}
     <div className="delivery-coverage" role="status">
@@ -182,9 +184,9 @@ export function AddressForm({ busy, displayName, api, onSave, buttonLabel }) {
   }
 
   return <div className="address-wizard">
-    <ol className="steps" aria-label="Add address progress">
-      <li aria-current={showDetails ? undefined : 'step'}>1. Map pin</li>
-      <li aria-current={showDetails ? 'step' : undefined}>2. Full address</li>
+    <ol className="address-steps" aria-label="Add address progress">
+      <li aria-current={showDetails ? undefined : 'step'}><span aria-hidden="true">{showDetails ? <Icon name="check" size={16} /> : 1}</span> Select location</li>
+      <li aria-current={showDetails ? 'step' : undefined}><span aria-hidden="true">2</span> Address details</li>
     </ol>
     {showDetails ? <section>
       <h3 ref={stepHeading} tabIndex={-1}>Enter the full address</h3>
@@ -213,7 +215,7 @@ export function AddressForm({ busy, displayName, api, onSave, buttonLabel }) {
       <h3 ref={stepHeading} tabIndex={-1}>Set your delivery pin</h3>
       <PinCoverage api={api} fields={fields} onChange={setFields} busy={busy} emptyMessage="Place a pin to continue." />
       <div className="address-step-actions">
-        <button type="button" disabled={busy || !pin} onClick={() => setConfirmedPin(pin)}>Continue to full address</button>
+        <button type="button" disabled={busy || !pin} onClick={() => setConfirmedPin(pin)}>Continue to address details <Icon name="arrow" size={17} /></button>
       </div>
     </section>}
   </div>
@@ -243,22 +245,44 @@ function SavedAddressMap({ address, api, canEdit, busy, onUpdatePin, onClose }) 
 }
 
 export function AddressBook({ addresses, api, displayName, busy, onSave, onDelete, onUpdatePin,
-  canEdit = () => true, buttonLabel = 'Save address', ownerName, startOpen = false }) {
+  canEdit = () => true, buttonLabel = 'Save address', ownerName, startOpen = false, split = false }) {
   const [selectedId, setSelectedId] = useState(null)
-  const [adding, setAdding] = useState(startOpen)
+  const [adding, setAdding] = useState(startOpen || split)
+  const addButton = useRef(null)
+  const formHeading = useRef(null)
+  const focusTarget = useRef(null)
+
+  useEffect(() => {
+    focusTarget.current?.current?.focus()
+    focusTarget.current = null
+  }, [adding])
+
+  function openForm() {
+    if (adding) formHeading.current?.focus()
+    else {
+      focusTarget.current = formHeading
+      setAdding(true)
+    }
+  }
+
+  function closeForm() {
+    focusTarget.current = addButton
+    setAdding(false)
+  }
+
   const form = <AddressForm api={api} busy={busy} displayName={displayName} buttonLabel={buttonLabel}
     onSave={async (address) => {
       const saved = await onSave(address)
-      if (saved && !startOpen) setAdding(false)
+      if (saved && !startOpen) closeForm()
       return saved
     }} />
-  return <div className="address-book">
-    {addresses.length > 0 && <ul className="address-list">{addresses.map((address) => {
+  const saved = addresses.length > 0 && <ul className="address-list">{addresses.map((address) => {
       const selected = selectedId === address.id
       const editable = canEdit(address)
-      return <li key={address.id} className="panel">
+      const label = address.label.toLowerCase()
+      return <li key={address.id} className={`panel saved-address${selected ? ' selected' : ''}`}>
         <div className="address-card">
-          <Icon name="pin" size={22} />
+          <IconTile name={label === 'home' ? 'home' : 'pin'} />
           <div className="address-card-text">
             <strong>{address.label}{ownerName && <span className="tag">{ownerName(address)}</span>}</strong>
             <span>{address.recipient_name}</span>
@@ -267,7 +291,7 @@ export function AddressBook({ addresses, api, displayName, busy, onSave, onDelet
           <div className="row-actions">
             <button type="button" className="secondary" disabled={busy} aria-expanded={selected}
               onClick={() => setSelectedId(selected ? null : address.id)}>
-              {address.latitude == null && editable ? 'Add map pin' : selected ? 'Hide map' : 'Check coverage'}
+              {selected ? 'Hide map' : address.latitude == null && editable ? 'Add map pin' : 'Check coverage'}
             </button>
             {onDelete && editable && <button className="secondary danger" disabled={busy} onClick={async () => {
               if (await confirmAction({ title: `Remove ${address.label}?`, text: `${address.address_line1}, ${address.city}`, action: 'Remove', danger: true })) {
@@ -279,10 +303,24 @@ export function AddressBook({ addresses, api, displayName, busy, onSave, onDelet
         {selected && <SavedAddressMap address={address} api={api} canEdit={editable} busy={busy}
           onUpdatePin={onUpdatePin} onClose={() => setSelectedId(null)} />}
       </li>
-    })}</ul>}
-    {startOpen ? <section className="panel">{form}</section> : adding ? <section className="panel">
-      <div className="section-head"><h2>New address</h2><button className="text-button" onClick={() => setAdding(false)}>Cancel</button></div>
-      {form}
-    </section> : <button className="secondary add-address" onClick={() => setAdding(true)}><Icon name="plus" size={18} /> Add an address</button>}
+    })}</ul>
+  const add = <button type="button" className="secondary add-address" ref={addButton} onClick={openForm}><Icon name="plus" size={18} /> Add a new address</button>
+  const editor = adding && <section className="panel address-editor">
+    {!startOpen && <div className="section-head">
+      <h2 ref={formHeading} tabIndex={-1}>Add a new address</h2>
+      <button type="button" className="text-button" disabled={busy} onClick={closeForm}>Cancel</button>
+    </div>}
+    {form}
+  </section>
+
+  return <div className={`address-book${split ? ' address-book-split' : ''}`}>
+    {split ? <>
+      <section className="saved-addresses">
+        <div className="section-head"><h2>Saved addresses</h2><small className="muted">{addresses.length} {addresses.length === 1 ? 'address' : 'addresses'}</small></div>
+        {saved || <p className="panel muted">No addresses saved yet.</p>}
+        {add}
+      </section>
+      {editor}
+    </> : <>{saved}{editor || add}</>}
   </div>
 }

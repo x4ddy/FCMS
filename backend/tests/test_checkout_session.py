@@ -1,6 +1,9 @@
 """Carts that are being checked out, and what each role may do."""
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
+from unittest.mock import patch
 
 from backend.services.familycart_service import checkout_session
 from backend.services.familycart_service.app import app as cart_app
@@ -58,6 +61,49 @@ class CheckoutSessionTests(base.CheckoutTests):
         problem = self.call("POST", CHECKOUT, self.member, 409)
         self.assertEqual(problem["detail"]["code"], "CHECKOUT_IN_PROGRESS")
 
+    def test_first_adult_claim_wins_during_jitter_and_replays_with_the_same_key(self):
+        self.grant_member()
+        self.tap("milk", 2, self.owner)
+        member = {**self.member, "Idempotency-Key": "member-claim"}
+        admin = {**self.owner, "Idempotency-Key": "admin-claim"}
+        committed = Event()
+
+        def jitter(low, high):
+            self.assertEqual((low, high), (0.250, 0.600))
+            committed.set()
+            return high
+
+        with patch("backend.services.familycart_service.app.uniform", side_effect=jitter) as delay:
+            with ThreadPoolExecutor() as pool:
+                opening = pool.submit(self.cart.post, CHECKOUT, headers=member)
+                self.assertTrue(committed.wait(5))
+                blocked = self.cart.post(CHECKOUT, headers=admin)
+                self.assert_problem(blocked, 409, "CHECKOUT_IN_PROGRESS")
+                other = blocked.json()["detail"]
+                self.assertEqual(other["checkout"]["user_id"], "user-adult")
+                self.assertIn(f'{other["checkout"]["display_name"]} is already checking out', other["message"])
+                first = opening.result(timeout=5)
+            replayed = self.cart.post(CHECKOUT, headers=member)
+            self.assertEqual((first.status_code, replayed.status_code), (200, 200))
+            self.assertEqual(first.json(), replayed.json())
+            self.assertEqual(self.published, 1)
+            delay.assert_called_once_with(0.250, 0.600)
+
+    def test_old_key_cannot_renew_or_end_a_later_checkout(self):
+        self.tap("milk", 1, self.owner)
+        earlier = {**self.owner, "Idempotency-Key": "earlier-claim"}
+        later = {**self.owner, "Idempotency-Key": "later-claim"}
+        with patch("backend.services.familycart_service.app.uniform", return_value=0):
+            first = self.call("POST", CHECKOUT, earlier)
+            renewed = self.call("POST", f"{CHECKOUT}?renew=true", earlier)
+            self.assertGreater(renewed["checkout"]["expires_at"], first["checkout"]["expires_at"])
+            self.call("DELETE", CHECKOUT, earlier, 204)
+            self.call("POST", CHECKOUT, later)
+        self.call("DELETE", CHECKOUT, earlier, 204)
+        self.assert_problem(self.cart.post(f"{CHECKOUT}?renew=true", headers=earlier), 409, "CHECKOUT_ENDED")
+        self.assert_problem(self.cart.post(CHECKOUT, headers=earlier), 409, "CHECKOUT_ENDED")
+        self.assertEqual(self.call("GET", CART, self.owner)["checkout"]["user_id"], "user-primary")
+
     def test_items_added_during_checkout_start_a_new_cart_after_the_order(self):
         address = self.address(kind="household")
         self.grant_member()
@@ -99,6 +145,7 @@ class CheckoutSessionTests(base.CheckoutTests):
         self.assertFalse(new["replaces"])
         self.assertTrue(new["name"].endswith(" 2"))
         self.assertEqual(self.contents(), ({("eggs", "user-primary"): 1}, {}))
+        self.assertEqual(self.call("GET", f"{HOUSEHOLD}/carts/{new['id']}", self.owner)["inventory_store_id"], "uae-dubai")
         self.assertEqual(self.contents(f"{HOUSEHOLD}/carts/{new['id']}")[0], {("bread", "user-primary"): 1})
 
     def test_without_waiting_items_the_cart_stays(self):
@@ -188,7 +235,7 @@ class CheckoutSessionTests(base.CheckoutTests):
         mine = self.address(kind="household", headers=self.member)
         self.tap("milk", 1, self.minor)  # children can add
         self.assertFalse(self.call("GET", CART, self.minor)["can_checkout"])
-        self.call("POST", CHECKOUT, self.minor, 403)
+        self.call("POST", CHECKOUT, {**self.minor, "Idempotency-Key": "minor-claim"}, 403)
         self.assertEqual(self.review(mine, cart=SHARED, headers=self.minor).status_code, 403)
         self.assertTrue(self.call("GET", CART, self.member)["can_checkout"])
         self.call("POST", CHECKOUT, self.member)
@@ -203,6 +250,27 @@ class CheckoutSessionTests(base.CheckoutTests):
         self.call("DELETE", f"{CART}/grants/user-adult", self.owner, 200)
         self.call("POST", CHECKOUT, self.member, 403)
         self.assert_problem(self.review(mine, cart=SHARED, headers=self.member), 404, "CART_NOT_FOUND")
+
+    def test_waiting_changes_include_frozen_quantities_and_store_cannot_switch(self):
+        self.grant_member()
+        self.set_stock("milk", 17)
+        self.tap("milk", 15, self.owner)
+        self.call("POST", CHECKOUT, self.owner)
+        self.tap("milk", 2, self.member)
+        item = f"{CART}/items/milk"
+        self.assert_problem(self.cart.patch(item, headers=self.member, json={"delta": 1}), 409, "OUT_OF_STOCK")
+        self.assert_problem(self.cart.put(f"{item}/contributions/me", headers=self.member, json={"quantity": 3}),
+                            409, "OUT_OF_STOCK")
+        al_ain = self.address(base.AL_AIN)
+        self.assert_problem(self.set_store(al_ain), 409, "CHECKOUT_IN_PROGRESS")
+        self.call("DELETE", CHECKOUT, self.owner, 204)
+        self.assertEqual(self.contents(), ({("milk", "user-primary"): 15, ("milk", "user-adult"): 2}, {}))
+        self.set_stock("milk", 10, "uae-al-ain")
+        saved = self.set_store(al_ain)
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["inventory_store_id"], "uae-al-ain")
+        self.assertEqual(self.contents(), ({("milk", "user-primary"): 15, ("milk", "user-adult"): 2}, {}))
+        self.assert_problem(self.review(al_ain), 409, "OUT_OF_STOCK")
 
     def test_only_the_admin_adds_and_removes_members_and_primary_users_can_ask(self):
         requests = f"{HOUSEHOLD}/member-requests"
@@ -229,7 +297,7 @@ class CheckoutSessionTests(base.CheckoutTests):
         self.call("PUT", f"{requests}/{refused['id']}", self.owner, 204, approved=False)
         self.assertEqual(self.call("GET", requests, self.member), [])
 
-    def test_members_can_leave_and_the_admin_cannot(self):
+    def test_only_adult_members_can_leave(self):
         self.grant_member()
         self.tap("milk", 1, self.member)
         self.call("POST", CHECKOUT, self.member)
@@ -242,7 +310,7 @@ class CheckoutSessionTests(base.CheckoutTests):
         self.assertNotIn("demo-household", [item["id"] for item in self.call("GET", f"{API}/households", self.member)])
         # Their checkout ended and what they added stays.
         self.assertEqual(self.contents(), ({("milk", "user-adult"): 1, ("eggs", "user-primary"): 1}, {}))
-        self.call("POST", leave, self.minor, 204)  # children can leave too
+        self.call("POST", leave, self.minor, 403)
 
     def test_only_the_admin_can_delete_the_household(self):
         address = self.address(kind="household")

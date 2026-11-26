@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Empty, Icon, money } from './ui.jsx'
+import { Empty, Icon, IconTile, money } from './ui.jsx'
 
 const placedDate = new Intl.DateTimeFormat('en-AE', { dateStyle: 'medium', timeStyle: 'short' })
 
@@ -42,8 +42,7 @@ export function OrderHistory({ account, onOpen, onShop }) {
   }, [])
 
   return <section className="page narrow">
-    <h1>Order history</h1>
-    <p className="muted">Orders you placed, including split deliveries.</p>
+    <div className="page-title"><IconTile name="orders" size={30} /><h1>Order history</h1></div>
     {orders.length > 0 && <ul className="order-history-list">
       {orders.map((order) => <li key={order.order_id}>
         <button className="panel order-history-row" aria-label={`View order ${order.order_number}`}

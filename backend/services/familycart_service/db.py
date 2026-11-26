@@ -35,7 +35,9 @@ def initialize_database(path: DatabaseTarget) -> None:
         if db.dialect == "sqlite":
             db.execute_script(f"BEGIN IMMEDIATE;\n{schema}\n{checkout_schema}")
             with db:
+                add_sqlite_columns(db, "household_invitations", {"child_user_id": "TEXT", "redemption_key_hash": "TEXT"})
                 add_sqlite_columns(db, "cart_sync_events", {"actor_id": "TEXT", "reason": "TEXT", "request_id": "TEXT"})
+                add_sqlite_columns(db, "carts", {"inventory_store_id": "TEXT"})
                 for table in ADDRESS_TABLES:
                     add_sqlite_columns(db, table, {"latitude": "REAL", "longitude": "REAL"})
                 merge_tables(db)
@@ -44,9 +46,12 @@ def initialize_database(path: DatabaseTarget) -> None:
             db.execute("BEGIN")
             try:
                 db.execute_script(schema)
+                db.execute("ALTER TABLE household_invitations ADD COLUMN IF NOT EXISTS child_user_id TEXT, "
+                           "ADD COLUMN IF NOT EXISTS redemption_key_hash TEXT")
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS actor_id TEXT")
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS reason TEXT")
                 db.execute("ALTER TABLE cart_sync_events ADD COLUMN IF NOT EXISTS request_id TEXT")
+                db.execute("ALTER TABLE carts ADD COLUMN IF NOT EXISTS inventory_store_id TEXT")
                 for table in ADDRESS_TABLES:
                     db.execute(f"""ALTER TABLE {table}
                         ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
@@ -250,7 +255,7 @@ def load_carts(
 ):
     query = """
         SELECT carts.id, carts.name, carts.creator_id, carts.adults_only,
-               carts.creator_revoked,
+           carts.creator_revoked, carts.inventory_store_id,
                cart_grants.member_id IS NOT NULL AS has_grant
         FROM carts
         LEFT JOIN cart_grants ON cart_grants.cart_id = carts.id AND cart_grants.member_id = ?
